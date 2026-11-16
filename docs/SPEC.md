@@ -125,6 +125,7 @@ layout:
 | `params` | no | The values a viewer can change, by name. |
 | `queries` | no | Named read-only SQL queries. Needed by every component except `text` and `controls`. |
 | `layout` | yes | A list of rows; each row is a list of 1 to 6 components. |
+| `theme` | no | This dashboard's own look: `colors`, `dark`, `fonts`, `type`, `radius`, `density`, `cards`, `chart`, as in `ui/theme.yaml` (see [STYLES.md](STYLES.md)). |
 
 Any other key is an error. YAML anchors and aliases (`&` / `*`), merge keys (`<<`) and repeated keys
 are errors too, so what you read is exactly what runs.
@@ -194,6 +195,13 @@ layout:
 Components in a row share its width equally. On a narrow screen rows stack.
 
 All components take `type`. Unknown settings are errors; the message lists the allowed ones.
+
+Every component also takes two settings for stylesheets (see [STYLES.md](STYLES.md)):
+
+| Setting | What it is |
+|---|---|
+| `id` | A stable name: lowercase letters, digits and `-`, starting with a letter (up to 41 characters), unique in the dashboard, not of the form `r1c2`. On the page as `data-id`. Without it the id is `r<row>c<column>`, counted from 0. |
+| `class` | One class name or a list of up to 8, for the project's stylesheets to hook on. Same characters as `id`; may not start with `eui-`. |
 
 ### `stat`
 
@@ -331,8 +339,10 @@ component uses, a param no query uses, params without a control.
 ## Compiled form (what the browser receives)
 
 The server sends `GET /api/dashboards/{slug}` as the compiled form. It contains no SQL: only
-params (with defaults worked out), which params each query uses, and the components with every
-setting present (`null` when not set). Text is sent as a tree of blocks for the renderer to turn
+params (with defaults worked out), which params each query uses, the components with every
+setting present (`null` when not set; `class` is a list or `null`), and `theme`: the dashboard's
+own look as checked custom properties, `{"both": {...}, "light": {...}, "dark": {...}}`, or
+`null`. Text is sent as a tree of blocks for the renderer to turn
 into DOM nodes; it never contains HTML.
 
 ```json
@@ -388,6 +398,10 @@ Block nodes: `{"t": "h", "level": 1-4, "c": [inline]}`, `{"t": "p", "c": [inline
 `{"t": "ul" | "ol", "items": [[inline], ...]}`. Inline nodes: `{"t": "text", "v": "..."}`,
 `{"t": "b", "c": [inline]}`, `{"t": "i", "c": [inline]}`,
 `{"t": "a", "href": "https://...", "c": [inline]}`.
+
+Every component in `layout` also has `"class"` (a list or `null`), left out of the example
+above for brevity. A dashboard with `theme:` sends, for example,
+`"theme": {"both": {"--eui-chart-line-width": "3"}, "light": {"--eui-accent": "#a2451d"}, "dark": {}}`.
 
 `table.columns` is `null` when every column should be shown in query order. `controls.params` is
 always a list.

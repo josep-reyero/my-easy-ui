@@ -1,10 +1,10 @@
 # my-easy-ui
 
-> **Rework in progress.** Two changes are being built right now and are not finished: fully
-> flexible styles (a theme file plus real CSS, [design](docs/STYLES-DESIGN.md)); and apps as proper
-> packages that contribute dashboards and panels to a project
-> ([design](https://github.com/josep-reyero/my-easy-software/blob/main/docs/apps.md)). Until this
-> note is removed, expect file formats and some commands to change.
+> **Rework in progress.** Fully flexible styles (a theme file plus real CSS) are built: see
+> [docs/STYLES.md](docs/STYLES.md). Apps as proper packages that contribute dashboards and panels
+> to a project ([design](https://github.com/josep-reyero/my-easy-software/blob/main/docs/apps.md))
+> are still being built. Until this note is removed, expect file formats and some commands to
+> change.
 
 A small dashboard server and browser renderer for projects built with [my-easy-software](https://github.com/josep-reyero/my-easy-software). One
 server process serves one project.
@@ -113,6 +113,25 @@ with `easy-ui preview`, whose link works once (it then prints a new one for the 
 or takes a picture with `easy-ui screenshot`. Automated tests set a made-up password with the
 library function `easyui.auth.set_password(state.auth, "...")`.
 
+**Restyling.** The look of the dashboards is the project's to change, with three kinds of
+files in `ui/`: a theme file (`ui/theme.yaml`: colours for light and dark, fonts, sizes, corners,
+spacing, panel and chart style), real CSS (`ui/styles/*.css`, against documented `eui-` names and
+custom properties) and fonts and pictures (`ui/assets/`). `easy-ui themes` lists five ready-made
+themes and `easy-ui theme use NAME` copies one into the project; `easy-ui style-guide --json`
+lists every name an agent can style against; a component's `id:` and `class:` settings give it
+hooks, and a dashboard's `theme:` gives it its own colours. Everything is checked by
+`easy-ui validate` (no addresses outside the project, no `expression()`, `@import` only of the
+project's own files, assets checked by their first bytes), published and rolled back with the
+dashboards, reloaded by the preview, and carried by exports. The sign-in, the sign-in settings,
+the preview badge and easy-ui's own problem pages always keep easy-ui's look: each dashboard is
+drawn in its own document tree that the project's CSS cannot leave. See
+[docs/STYLES.md](docs/STYLES.md), which starts with a five-minute walkthrough.
+
+<p>
+<img src="docs/screenshots/theme-trail-light.png" alt="The demo with the trail theme: sage paper, pine green, slab-serif figures" width="420">
+<img src="docs/screenshots/theme-instrument-dark.png" alt="The demo with the instrument theme in dark mode: teal on near-black, monospaced figures" width="420">
+</p>
+
 **Sharing a copy.** `easy-ui export --out DIR` writes a self-contained folder (`index.html`
 and its files) with the published dashboards and the numbers they show for one set of control
 values (`--set NAME=VALUE`, `--dashboard NAME`); `--single-file --out FILE.html` writes one HTML
@@ -173,7 +192,8 @@ result when stopped with Ctrl-C or SIGTERM. Exit codes: 0 ok, 1 error, 2 usage, 
 not allowed, 5 refused for safety, 6 needs you, 75 try again later.
 
 The full dashboard format, with examples, is in [docs/SPEC.md](docs/SPEC.md); the look of the
-page is described in [docs/DESIGN.md](docs/DESIGN.md).
+page is described in [docs/DESIGN.md](docs/DESIGN.md), and how a project changes it in
+[docs/STYLES.md](docs/STYLES.md).
 
 ![The demo's overview dashboard](docs/screenshots/overview-desktop-light.png)
 
@@ -229,7 +249,8 @@ be installed outside `/var/lib/mes` and outside home folders (for example `/usr/
 
 v1. Everything above works: the dashboard format and its checks, the data copy, the query
 sandbox, publishing with versions and rollback, the server with passkeys, password and recovery
-codes, the browser page, the preview, static exports, pictures and the systemd files. Known
+codes, the browser page, themes and project stylesheets, the preview, static exports, pictures
+and the systemd files. Known
 limits: formatting is English-style only (`1,234.5`, `14 Mar 2026`); charts space points evenly
 (one per row), which suits daily and weekly series; a browser that has never signed in can be
 kept from signing in *with the password* by someone on the private network who keeps sending
