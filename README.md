@@ -233,7 +233,7 @@ This is one piece of a small family of projects that work together or on their o
 
 - [my-easy-software](https://github.com/josep-reyero/my-easy-software): the framework: create, run, deploy and share small personal projects with the `mes` command.
 - [my-bucket-storage](https://github.com/josep-reyero/my-bucket-storage): storage: a small object store with no server process that takes little disk space.
-- [fitdata-garmin](https://github.com/josep-reyero/fitdata-garmin): the first project built this way: a personal Garmin data archive with a command line for agents.
+- [fitdata](https://github.com/josep-reyero/fitdata): the first project built this way: a personal Garmin data archive with a command line for agents.
 
 ## License
 
