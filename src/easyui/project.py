@@ -60,7 +60,9 @@ APPS_DIR = "apps"
 APP_TOML = "app.toml"
 MAX_LOCK_BYTES = 64_000
 MAX_APP_TOML_BYTES = 64_000
-RESERVED_SHORT_NAMES = ("describe", "guide", "apps", "help")
+RESERVED_SHORT_NAMES = ("describe", "guide", "apps", "help", "sqlite", "mes")
+# Table names that belong to SQLite or to mes itself: no app's tables may start like this.
+RESERVED_TABLE_PREFIXES = ("sqlite_", "mes_")
 APP_KEYS = ("app", "data", "jobs", "ui")
 APP_UI_KEYS = ("dashboards", "tables", "contributes")
 APP_TABLE_RE = re.compile(r"^[a-z][a-z0-9_]{0,62}\Z")
@@ -270,8 +272,25 @@ class AppFolder:
 # ---------------------------------------------------------------- finding the apps
 
 
+_LOCK_CHANGED = ("project.toml changed after apps.lock.json was written",
+                 "the apps in apps.lock.json are not the ones [project] apps lists, in that order")
+
+
 def _stale(why: str) -> ConfigError:
+    if why in _LOCK_CHANGED:
+        return ConfigError("project.toml changed after the list of apps (apps.lock.json) was written, so easy-ui will "
+                           "not guess which apps to read.", hint="Run: mes apps sync (it takes a second), then run "
+                           "this command again.", detail=why, code="apps_lock_stale")
     return ConfigError(STALE_LOCK, hint=SYNC_HINT, detail=why, code="apps_lock_stale")
+
+
+def _in_project_ok(config: Any, pkg: str) -> bool:
+    try:
+        folder = _in_project_folder(config, pkg)
+        st = os.lstat(folder / APP_TOML)
+    except (OSError, ConfigError):
+        return False
+    return stat.S_ISREG(st.st_mode)
 
 
 def lock_state(config: Any) -> str:
@@ -455,8 +474,15 @@ def _parse_app(config: Any, pkg: str, folder: Path, in_project: bool, data: dict
     prefix = table_prefix(short)
     if short in RESERVED_SHORT_NAMES:
         raise ConfigError(
-            f"The app in {file} would have the short name {short!r}, which the project command keeps for itself.",
+            f"The app in {file} would have the short name {short!r}, which the project command or the database keeps "
+            "for itself.",
             hint=f"Rename the app, for example {config.name}-{short}-app.",
+        )
+    if prefix.startswith(RESERVED_TABLE_PREFIXES):
+        raise ConfigError(
+            f"The tables of the app in {file} would start with {prefix!r}, and names that start with sqlite_ or mes_ "
+            "belong to the database itself.",
+            hint=f"Rename the app, for example {config.name}-{short.replace('-', '')}x.",
         )
     data_t = data.get("data", {})
     if not isinstance(data_t, dict):
@@ -548,7 +574,15 @@ def _check_together(config: Any, apps: list[App]) -> None:
 
 def load_apps(config: Any) -> tuple[App, ...]:
     """The project's apps in ``[project] apps`` order (through apps.lock.json, or the in-project fallback)."""
-    lock = _read_lock(config)
+    try:
+        lock = _read_lock(config)
+    except ConfigError as e:
+        # Out of date only because project.toml changed, and every app is in apps/: read the apps
+        # exactly as without a lock (the same rule as mes). A damaged lock is still refused.
+        if e.code != "apps_lock_stale" or e.detail not in _LOCK_CHANGED or not all(
+                _in_project_ok(config, pkg) for pkg in config.packages):
+            raise
+        lock = None
     apps: list[App] = []
     if lock is not None:
         for e in lock["apps"]:

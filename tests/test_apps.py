@@ -197,8 +197,33 @@ def test_a_stale_lock_is_refused(tmp_path, change, detail):
     write_lock(root, tmp_path, **change)
     with pytest.raises(ConfigError) as e:
         appconfig.load(root).apps
-    assert e.value.message == project.STALE_LOCK and e.value.hint == "Run: mes apps sync"
+    if "project.toml changed" in detail:
+        assert e.value.message.startswith("project.toml changed after the list of apps")
+    else:
+        assert e.value.message == project.STALE_LOCK and e.value.hint == "Run: mes apps sync"
     assert detail in e.value.detail and e.value.code == "apps_lock_stale"
+
+
+def test_a_lock_made_stale_by_editing_project_toml_is_ignored_when_every_app_is_in_apps(tmp_path):
+    root = make(tmp_path, {"fitlab_walks": WALKS, "fitlab_rides": RIDES})
+    write_lock(root, tmp_path)
+    assert [a.name for a in appconfig.load(root).apps] == ["fitlab-walks", "fitlab-rides"]
+    (root / "project.toml").write_text((root / "project.toml").read_text() + "# touch\n")
+    assert [a.name for a in appconfig.load(root).apps] == ["fitlab-walks", "fitlab-rides"]
+    (root / project.LOCK_FILE).write_text("{not json")  # a damaged lock is still refused
+    with pytest.raises(ConfigError) as e:
+        appconfig.load(root).apps
+    assert e.value.code == "apps_lock_stale"
+
+
+@pytest.mark.parametrize("name", ["fitlab-sqlite", "fitlab-mes", "fitlab-sqlite-x", "mes-tools"])
+def test_an_app_may_not_get_a_table_prefix_of_the_database_itself(tmp_path, name):
+    """Malformed input: such an app could list sqlite_master as one of its own tables."""
+    text = RIDES.replace('name = "fitlab-rides"', f'name = "{name}"')
+    root = make(tmp_path, {"fitlab_rides": text})
+    with pytest.raises(ConfigError) as e:
+        appconfig.load(root).apps
+    assert "keeps for itself" in e.value.message or "sqlite_ or mes_" in e.value.message
 
 
 def test_the_lock_must_list_the_packages_in_order(tmp_path):
