@@ -77,10 +77,10 @@ def test_publish_creates_immutable_version(built_app):
         f = vdir / d["file"]
         assert hashlib.sha256(f.read_bytes()).hexdigest() == d["sha256"]
         assert d["size"] == f.stat().st_size
-        assert stat.S_IMODE(f.stat().st_mode) == 0o444
+        assert stat.S_IMODE(f.stat().st_mode) == 0o440
     # writable folders: deleting the state folder to start over must just work
-    assert stat.S_IMODE(vdir.stat().st_mode) == 0o755
-    assert stat.S_IMODE((vdir / "dashboards").stat().st_mode) == 0o755
+    assert stat.S_IMODE(vdir.stat().st_mode) == 0o700  # 0750 when the ui folder lets its group in (a server)
+    assert stat.S_IMODE((vdir / "dashboards").stat().st_mode) == 0o700
     assert (vdir / "dashboards" / "overview.yaml").read_text() == OVERVIEW_YAML
     assert not [p for p in st.specs.iterdir() if p.name.startswith(".tmp-")]
 

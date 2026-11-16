@@ -189,7 +189,8 @@ function leaveView() {
 async function route() {
   if (!state.shell) return;
   // A shared copy opened again with a (new) link key while already open: start over so the key is read.
-  if (state.exported && /^#k=/.test(window.location.hash)) {
+  // (Only a new key of a locked copy does that; anything else after #k= is just taken out of the address.)
+  if (state.exported && typeof api.keyInAddress === "function" && api.keyInAddress()) {
     window.location.reload();
     return;
   }

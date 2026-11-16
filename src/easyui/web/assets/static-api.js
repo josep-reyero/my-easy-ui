@@ -3,15 +3,18 @@
 // network request at all. In a link-mode export the data is encrypted
 // (AES-256-GCM); the key is only in the part of the link after "#k=", which
 // browsers never send anywhere, and is decrypted here with WebCrypto.
+// The key is kept in this script only (never in the browser's storage) and is
+// taken out of the address bar at once; a reload needs the whole link again.
 
 import { ApiError, describe } from "./errors.js";
 
 export { ApiError, describe };
 
 const KEY_RE = /^#k=([A-Za-z0-9_-]{43})(?:&|$)/;
-const STORE = "easyui-export-key";
 const AAD = new TextEncoder().encode("easy-ui export v1");
 let loading = null;
+let currentKey = null; // the key of this page, for as long as it is open
+let isLocked = false;
 
 function locked(message, hint) {
   return new ApiError({ status: 403, code: "export_locked", message, hint });
@@ -25,27 +28,12 @@ function fromB64url(text) {
   return out;
 }
 
-function storedKey() {
-  try {
-    return window.sessionStorage.getItem(STORE);
-  } catch {
-    return null;
-  }
-}
-
-/** The key from the address (then kept for this tab only, and taken out of the address bar). */
+/** The key from the address (then kept in this script only, and taken out of the address bar). */
 function takeKey() {
   const m = KEY_RE.exec(window.location.hash || "");
-  if (m) {
-    try {
-      window.sessionStorage.setItem(STORE, m[1]);
-    } catch {
-      // Without storage a reload needs the full link again; the page still opens now.
-    }
-    window.history.replaceState(null, "", "#/");
-    return m[1];
-  }
-  return storedKey();
+  if (/^#k=/.test(window.location.hash || "")) window.history.replaceState(null, "", "#/");
+  if (m) currentKey = m[1];
+  return currentKey;
 }
 
 async function decrypt(box, keyText) {
@@ -66,11 +54,7 @@ async function decrypt(box, keyText) {
     );
     return JSON.parse(new TextDecoder().decode(plain));
   } catch {
-    try {
-      window.sessionStorage.removeItem(STORE);
-    } catch {
-      // nothing kept
-    }
+    currentKey = null;
     throw locked(
       "This link's key does not open this page.",
       "The link may be cut short, or the page was shared again with a new key. Ask for the current link.",
@@ -84,7 +68,8 @@ function load() {
       const el = document.getElementById("easyui-export");
       if (!el) throw locked("This page has no data.", "Make the copy again with easy-ui export.");
       const raw = JSON.parse(el.textContent);
-      if (raw && raw.enc === "A256GCM") {
+      isLocked = Boolean(raw && raw.enc === "A256GCM");
+      if (isLocked) {
         const keyText = takeKey();
         if (!keyText) {
           throw locked(
@@ -154,6 +139,17 @@ export const api = {
   },
   async rev() {
     return { rev: "export" };
+  },
+  /** True when the address now holds a new, well-formed key for this locked page (then the page starts
+   * over to read it). Anything else after "#k=" (a plain copy, a broken or the same key) is only taken
+   * out of the address bar, so the page never reloads again and again. */
+  keyInAddress() {
+    const hash = window.location.hash || "";
+    if (!/^#k=/.test(hash)) return false;
+    const m = KEY_RE.exec(hash);
+    const fresh = Boolean(isLocked && m && m[1] !== currentKey);
+    if (!fresh) window.history.replaceState(null, "", "#/");
+    return fresh;
   },
   async logout() {
     return { signed_in: false };

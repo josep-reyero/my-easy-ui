@@ -74,7 +74,6 @@ from easyui.appconfig import AppConfig
 from easyui.errors import ConfigError, EasyUIError, NotAvailable, NotFound, SpecError, UsageError
 
 HOST = "127.0.0.1"
-HEAP_LIMIT = 256_000_000
 PROBLEMS_SLUG = "easy-ui-problems"
 FIXTURES_DIR = ("ui", "fixtures")
 FIXTURE_SUFFIXES = (".sqlite", ".sqlite3", ".db")
@@ -464,7 +463,10 @@ def serve(preview: Preview, *, port: int = 0, on_ready: Callable[[str], None] | 
                 on_link_used(make_url(HOST, port_used, token))
 
         app = _server_app(preview, link_used, port=port_used)
-        sandbox.set_heap_limit(HEAP_LIMIT)
+        from easyui import security  # noqa: PLC0415
+
+        security.verify_vendored(Path(__file__).resolve().parent / "web")
+        sandbox.ensure_heap_limit()
         url = make_url(HOST, port_used, preview.token)
         make_config = getattr(sys.modules.get("easyui.server"), "uvicorn_config", None)
         if make_config is not None:

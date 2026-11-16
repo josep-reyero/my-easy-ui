@@ -53,7 +53,7 @@ ALLOWED_KEYS = {
     "ProtectHostname", "ProtectProc", "ProcSubset", "KeyringMode", "RemoveIPC", "TemporaryFileSystem",
     "BindReadOnlyPaths", "BindPaths", "InaccessiblePaths", "PrivateNetwork", "RestrictAddressFamilies",
     "IPAddressDeny", "SystemCallFilter", "SystemCallErrorNumber", "SystemCallArchitectures", "RestrictNamespaces",
-    "RestrictRealtime", "LockPersonality", "MemoryDenyWriteExecute", "MemoryMax", "TasksMax", "LimitNOFILE",
+    "RestrictRealtime", "LockPersonality", "MemoryDenyWriteExecute", "MemoryMax", "OOMPolicy", "TasksMax", "LimitNOFILE",
     "LimitCORE", "ListenStream", "SocketUser", "SocketGroup", "SocketMode", "DirectoryMode", "RemoveOnStop",
     "Accept", "WantedBy",
 }

@@ -12,6 +12,7 @@ Modules
 ``easyui.formats``    the value-format vocabulary (shared with the renderer)
 ``easyui.spec``       loading, validating and compiling dashboard files
 ``easyui.sandbox``    the read-only query sandbox
+``easyui.workers``    the killable worker processes every dashboard query runs in
 ``easyui.bundle``     building the dashboard data copy, the current link, rev
 ``easyui.cli``        the ``easy-ui`` command line
 

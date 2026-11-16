@@ -145,10 +145,7 @@ FORBIDDEN = {
 def test_js_uses_no_markup_or_code_from_text(path):
     text = path.read_text(encoding="utf-8")
     found = [name for name, rx in FORBIDDEN.items() if rx.search(text)]
-    if path.name == "static-api.js":
-        # A locked export keeps its link key for that browser tab only (sessionStorage), nothing else.
-        assert set(re.findall(r"\b(?:local|session)Storage\b", text)) == {"sessionStorage"}
-        found = [f for f in found if f != "localStorage"]
+    # A locked export keeps its link key in the script only: no storage of any kind, in any file.
     assert not found, f"{path.name} uses {found}"
 
 

@@ -283,6 +283,15 @@ def screenshot(
     browser = browser or find_browser()
     if not browser:
         raise _no_browser()
+    with paths.cleanup_on_signals():  # SIGTERM / SIGHUP still remove the temporary copy of the dashboards
+        return _screenshot(config, out=out, dashboard=dashboard, phone=phone, dark=dark, w=w, h=h, height=height,
+                           published=published, fixture=fixture, values=values, browser=browser)
+
+
+def _screenshot(config: Any, *, out: Path, dashboard: str | None, phone: bool, dark: bool, w: int, h: int,
+                height: int | None, published: bool, fixture: bool, values: dict | None, browser: str) -> dict[str, Any]:
+    from easyui import export  # noqa: PLC0415
+
     tmp = Path(tempfile.mkdtemp(prefix="easyui-shot-"))
     try:
         # Every dashboard, so the menu looks as it does on the live page; the picture is of the chosen one.
