@@ -184,6 +184,23 @@ def test_low_contrast_is_a_warning_not_an_error():
     assert any("contrast" in w["problem"].lower() for w in warnings)
 
 
+def test_light_chart_colours_reused_in_dark_mode_are_checked_there():
+    text = "colors:\n  chart: ['#3f5a7a', '#e07a1f']\n"
+    got, errors, warnings = themes.check_theme(text)
+    assert got is not None and errors == []
+    dark = [w for w in warnings if "In dark mode, chart colour 1 (#3f5a7a)" in w["problem"]]
+    assert dark and "dark:" in dark[0]["hint"]
+    assert not any("chart colour 2" in w["problem"] for w in warnings)  # the orange stands out on dark
+    _g, _e, warnings = themes.check_theme(text + "dark:\n  chart: ['#8fb3d9', '#e0b25a']\n")
+    assert not any("In dark mode, chart colour" in w["problem"] for w in warnings)
+
+
+def test_ready_made_themes_have_no_warnings():
+    for name in [t["name"] for t in themes.ready_made()]:
+        _g, errors, warnings = themes.check_theme(themes.ready_made_text(name))
+        assert errors == [] and warnings == [], (name, warnings)
+
+
 def test_font_files_must_be_woff2_assets():
     text = "font_files:\n  Notes:\n    - file: fonts/notes.woff2\nfonts:\n  headings: Notes\n"
     got, errors, _w = themes.check_theme(text, assets={"fonts/notes.woff2"})

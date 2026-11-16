@@ -325,6 +325,18 @@ def test_an_override_that_overrides_nothing_is_a_warning(fitlab):
     assert any("does not say which app and dashboard" in p["problem"] for p in comp.problems)
 
 
+def test_a_misnamed_override_gets_the_apps_full_name(fitlab):
+    sections = fitlab / "ui" / "sections"
+    sections.mkdir(parents=True)
+    for name in ("walks.overview", "fitlab_walks.overview"):
+        (sections / f"{name}.yaml").write_text("spec: easy-ui/sections-v1\nsections: []\n")
+    comp = compose.compose(cfg_of(fitlab))
+    warn = next(w for w in comp.warnings if w["file"] == "ui/sections/walks.overview.yaml")
+    assert warn["hint"] == "walks is not the app's full name: rename the file to ui/sections/fitlab-walks.overview.yaml."
+    prob = next(p for p in comp.problems if p["file"] == "ui/sections/fitlab_walks.overview.yaml")
+    assert prob["hint"] == "Rename it to ui/sections/fitlab-walks.overview.yaml."
+
+
 def test_two_apps_with_the_same_dashboard(fitlab):
     rides = site(fitlab) / "fitlab_rides"
     toml = rides / "app.toml"
@@ -401,9 +413,10 @@ def test_a_stale_lock_stops_composition_with_a_plain_message(fitlab):
     toml = fitlab / "project.toml"
     toml.write_text(toml.read_text() + "\n# changed\n")
     code, data = run_cli_json("compose")
-    assert code == 1 and data["error"]["message"] == (
-        "The list of installed apps (apps.lock.json) is out of date, so the apps cannot be found safely.")
-    assert data["error"]["hint"] == "Run: mes apps sync"
+    # fitlab-rides is installed outside apps/, so the lock is needed and is refused.
+    assert code == 1 and data["error"]["message"].startswith(
+        "project.toml changed after the list of apps (apps.lock.json) was written")
+    assert data["error"]["hint"].startswith("Run: mes apps sync")
     with pytest.raises(ConfigError):
         cfg_of(fitlab).tables
 

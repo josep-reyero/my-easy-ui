@@ -98,7 +98,9 @@ STABLE_CLASSES: dict[str, str] = {
     "eui-row": "One row of the layout. Carries data-row (1 for the first row).",
     "eui-component": "Every component. Carries data-type and data-id, plus the classes of its class: setting.",
     "eui-title": "A component's heading.",
-    "eui-value": "The big figure of a stat (and the value in a chart's readout).",
+    "eui-value": ("The big figure of a stat (and the value in a chart's readout). Its font-size and font-family "
+                  "are the figure's (the unit is 0.4 of it); --eui-size-figure and --eui-font-numbers set them for "
+                  "every stat at once."),
     "eui-unit": "The unit set smaller beside a figure (km, min).",
     "eui-delta": "The change under a stat. Also has is-up, is-down or is-flat, and is-good or is-bad with better:.",
     "eui-hint": "The explanation under a stat (hint:).",

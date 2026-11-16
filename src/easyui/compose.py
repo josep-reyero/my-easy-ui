@@ -157,6 +157,18 @@ def _problem(label: str, message: str, hint: str | None = None, level: str = "er
     return spec.Problem(label, "", message, None, hint, level=level).to_dict()
 
 
+def _override_name(stem: str, apps: Any) -> str | None:
+    """``<app>.<dashboard>`` with the app's full name, when ``stem`` names an app by its short name or
+    its package name (``moves.overview`` or ``demo_moves.overview`` -> ``demo-moves.overview``)."""
+    word, dot, slug = stem.partition(".")
+    if not dot or not spec.SLUG_RE.match(slug):
+        return None
+    for a in apps:
+        if word in (a.short, a.package, a.name.replace("-", "_")) and word != a.name:
+            return f"{a.name}.{slug}"
+    return None
+
+
 def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -600,7 +612,16 @@ def compose(config: Any, *, bundle_path: Path | None = None, vary: bool = True, 
     apps = tuple(config.apps if apps is None else apps)
     out.apps = apps
     project_dash = _read_project(config, "dashboards", spec.SLUG_RE, out.problems, out.notes)
+    first = len(out.problems)
     project_sec = _read_project(config, "sections", OVERRIDE_RE, out.problems, out.notes)
+    for prob in out.problems[first:]:  # a file name that is not <app name>.<dashboard>: name the right one
+        stem = str(prob.get("file", "")).removeprefix("ui/sections/").removesuffix(".yaml")
+        better = _override_name(stem, apps)
+        if better:
+            prob["hint"] = f"Rename it to ui/sections/{better}.yaml."
+        elif apps:
+            prob["hint"] = (f"Name it ui/sections/<app name>.<dashboard>.yaml with the app's full name, for example "
+                            f"{apps[0].name}.overview.yaml.")
     out.project_files = list(project_dash.values()) + list(project_sec.values())
     app_dash: dict[str, list[tuple[Any, Part]]] = {}
     app_sec: dict[tuple[str, str], Part] = {}
@@ -666,10 +687,16 @@ def compose(config: Any, *, bundle_path: Path | None = None, vary: bool = True, 
         elif slug not in final_slugs:
             why = f'this project has no dashboard called "{slug}"'
         if why:
+            better = _override_name(key, apps) if app is None else None
+            if better:
+                hint = (f"{app_name} is not the app's full name: rename the file to ui/sections/{better}.yaml.")
+            else:
+                hint = ("Name it ui/sections/<app name>.<dashboard>.yaml for an app that adds sections to that "
+                        "dashboard, or remove it." + (f" This project's apps: {', '.join(a.name for a in apps)}."
+                                                     if apps else ""))
             out.warnings.append(_problem(
-                part.label, f"{part.label} replaces sections, but {why}, so it changes nothing.",
-                f"Name it ui/sections/<app name>.<dashboard>.yaml for an app that adds sections to that dashboard, "
-                "or remove it.", level="warning"))
+                part.label, f"{part.label} replaces sections, but {why}, so it changes nothing.", hint,
+                level="warning"))
 
     for slug, base, origin, replaces, replaced_file in finals:
         contributions = []

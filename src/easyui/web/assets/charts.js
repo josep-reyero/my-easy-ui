@@ -246,7 +246,9 @@ export class Chart extends Frame {
       animationEasing: "cubicOut",
       textStyle: { fontFamily: p.font },
       color: p.series,
-      grid: { left: 4, right: 8, top: unitName ? 28 : 14, bottom: 4, containLabel: true },
+      // Room to the right for the last x label: centred under the last bar, and with some fonts
+      // wider than the right-aligned space a line chart leaves it (it was clipped: "28 Ap").
+      grid: { left: 4, right: Math.round(p.fontSize * 2), top: unitName ? 28 : 14, bottom: 4, containLabel: true },
       tooltip: {
         trigger: "axis",
         showContent: false,
@@ -281,7 +283,9 @@ export class Chart extends Frame {
         axisTick: { show: false },
         splitLine: p.gridStyle === "none"
           ? { show: false }
-          : { lineStyle: { color: p.grid, width: 1, type: p.gridStyle } },
+          // "dotted" as an explicit, sparser pattern: ECharts' own dots are so close that a faint
+          // grid colour reads as a solid hairline.
+          : { lineStyle: { color: p.grid, width: 1, type: p.gridStyle === "dotted" ? [1, 4] : p.gridStyle } },
         axisLabel: { ...axisLabel, formatter: (v) => yFmt(v) },
       },
       series: series.flatMap((s, i) => {
@@ -348,7 +352,9 @@ export class Chart extends Frame {
     const { max, lo, hi } = this.data;
     const chosen = Number(this.comp.step) > 0 ? Number(this.comp.step) : null;
     const step = chosen || (type === "line" ? null : axisStep(this.comp.format, max));
-    if (!step || lo === null) return {};
+    // Whole numbers ("integer") never get ticks such as 0.5.
+    const whole = this.comp.format === "integer" ? { minInterval: 1 } : {};
+    if (!step || lo === null) return whole;
     const fromZero = type !== "line";
     const bottom = fromZero ? Math.min(0, Math.floor(lo / step) * step) : Math.floor(lo / step) * step;
     const top = Math.max(bottom + step, Math.ceil(hi / step) * step);

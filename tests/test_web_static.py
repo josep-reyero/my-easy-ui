@@ -370,3 +370,16 @@ def test_js_axis_steps_are_round(tmp_path):
     assert proc.returncode == 0, proc.stderr
     # 20 km lines up to 65 km; 250 m below a kilometre; whole km; 30 min; 2 min; numbers left to the chart.
     assert json.loads(proc.stdout) == [20000, 250, 1000, 1800, 120, None, None, None]
+
+
+def test_a_rule_on_eui_value_sizes_the_figure():
+    """The figure inherits size and font from .eui-value, so `.eui-value { font-size }` works."""
+    import re as _re
+    from pathlib import Path as _P
+
+    css = (_P(__file__).resolve().parents[1] / "src" / "easyui" / "web" / "assets" / "style.css").read_text()
+    fig = _re.search(r"\.stat-figure \.fig,\s*\.readout-value \.fig \{(.*?)\}", css, _re.S).group(1)
+    assert "font-size: 1em" in fig and "font-family: inherit" in fig
+    value = _re.search(r"\n\.stat-value \{(.*?)\}", css, _re.S).group(1)
+    assert "var(--eui-size-figure)" in value and "var(--eui-font-numbers)" in value
+    assert not _re.search(r"\.fig \{[^}]*var\(--eui-size-figure\)", css)

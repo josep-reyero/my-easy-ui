@@ -156,7 +156,9 @@ Documented and kept stable across versions: renaming one is a breaking change.
   its `class:` setting.
 - **Parts:** `.eui-title`, `.eui-value`, `.eui-unit`, `.eui-delta`, `.eui-hint`, `.eui-chart`,
   `.eui-readout`, `.eui-legend`, `.eui-table`, `.eui-th`, `.eui-td`, `.eui-text`, `.eui-control`,
-  `.eui-empty`, `.eui-error`.
+  `.eui-empty`, `.eui-error`. A figure takes its size and font from `.eui-value`
+  (`.eui-value { font-size: 4rem; font-family: ... }` changes it; the unit is 0.4 of it);
+  `--eui-size-figure` and `--eui-font-numbers` do the same for every stat at once.
 
 Every component takes two more settings in its dashboard file:
 

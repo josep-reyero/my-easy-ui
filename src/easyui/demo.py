@@ -171,6 +171,9 @@ SLEEP_CSS = """\
 .eui-component {
   --eui-chart-1: #6b5fb5;
 }
+.eui-app[data-theme="dark"] .eui-component {
+  --eui-chart-1: #a99bff; /* lighter, so it stands out on a dark panel */
+}
 .eui-title {
   letter-spacing: 0.02em;
 }

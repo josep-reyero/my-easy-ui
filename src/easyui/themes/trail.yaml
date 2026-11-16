@@ -9,7 +9,7 @@ colors:
   text: "#1f2a24"
   muted: "#56625a"
   border: "#d1d7c9"
-  grid: "#dfe4d7"
+  grid: "#cdd4c3"
   good: "#3b7a37"
   bad: "#a4452c"
   chart: ["#2c6a4f", "#b07d22", "#4f78a0", "#9b5d3f", "#6f8a2e"]
@@ -21,7 +21,7 @@ dark:
   text: "#e4e9e1"
   muted: "#9aa79d"
   border: "#2c362f"
-  grid: "#262f28"
+  grid: "#334036"
   good: "#8fcf8a"
   bad: "#f0a080"
   chart: ["#78c29c", "#e0b25a", "#8fb3d9", "#d4906b", "#b5c46a"]

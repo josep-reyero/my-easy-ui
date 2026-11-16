@@ -218,7 +218,9 @@ def _tokens(d: dict[str, Any]) -> dict[str, dict[str, str]]:
             both["--eui-card-shadow"] = "inset 0 0 0 1px color-mix(in srgb, var(--eui-border) 55%, transparent)"
             both["--eui-card-padding"] = "var(--eui-pad)"
         elif style == "outline":
-            both["--eui-card-background"] = "transparent"
+            # The page's own colour, not "transparent": sticky table headers need an opaque fill that
+            # matches the panel.
+            both["--eui-card-background"] = "var(--eui-background)"
             both["--eui-card-shadow"] = "inset 0 0 0 1px var(--eui-border)"
             both["--eui-card-padding"] = "var(--eui-pad)"
         elif style == "raised":
@@ -227,7 +229,7 @@ def _tokens(d: dict[str, Any]) -> dict[str, dict[str, str]]:
             dark["--eui-card-shadow"] = "0 1px 2px rgb(0 0 0 / 0.5), 0 14px 34px -16px rgb(0 0 0 / 0.7)"
             both["--eui-card-padding"] = "var(--eui-pad)"
         else:  # plain
-            both["--eui-card-background"] = "transparent"
+            both["--eui-card-background"] = "var(--eui-background)"
             both["--eui-card-shadow"] = "none"
             both["--eui-card-padding"] = "0px"
     ch = d.get("chart") or {}
@@ -526,6 +528,19 @@ def _contrast_warnings(ctx: Any, path: tuple, d: dict[str, Any]) -> None:
             if ratio < 2.0:
                 ctx.warn(path + (key, "chart", i), f"In {scheme} mode, chart colour {i + 1} ({c}) barely stands out "
                          f"from the panel ({ratio:.1f}:1).", hint="Pick a colour further from surface.")
+    light_chart = (d.get("colors") or {}).get("chart") or []
+    dark_given = d.get("dark") or {}
+    if light_chart and not dark_given.get("chart"):
+        # Dark mode reuses the light chart colours when dark: has no chart list.
+        surface = dark_given.get("surface") or BUILTIN_COLORS["dark"]["surface"]
+        for i, c in enumerate(light_chart):
+            ratio = contrast(c, surface)
+            if ratio < 3.0:  # WCAG's minimum for graphics; these colours were never chosen for dark
+                ctx.warn(path + ("colors", "chart", i),
+                         f"In dark mode, chart colour {i + 1} ({c}) is used as it is, because dark: has no chart "
+                         f"list, and it barely stands out from the dark panel ({surface}, {ratio:.1f}:1).",
+                         hint="Add a chart list under dark: with lighter colours, for example\ndark:\n  chart: "
+                         "[\"#8fb3d9\", \"#e0b25a\"]")
 
 
 def check_theme(text: str, *, file: str = "ui/theme.yaml", assets: Any = ()) -> tuple[Theme | None, list[dict], list[dict]]:

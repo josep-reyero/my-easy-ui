@@ -595,7 +595,7 @@ a {
     grid-column: 1 / -1;
   }
 
-  .row-stats .stat-figure .fig {
+  .row-stats .stat-value {
     font-size: clamp(1.625rem, 8.4vw, 2.375rem);
   }
 
@@ -750,34 +750,50 @@ a {
   font-weight: 500;
 }
 
+/* The size and font of a figure are set on .eui-value (.stat-value, .readout-value), and the
+   figure itself only inherits them, so a project rule on .eui-value { font-size; font-family }
+   changes the figure. The unit is sized relative to it. */
 .stat-value {
-  margin-top: 4px;
-  line-height: 1.05;
-}
-
-.stat-figure .fig,
-.readout-value .fig {
+  margin-top: 8px;
+  line-height: 1.1;
   font-family: var(--eui-font-numbers);
-}
-
-.stat-figure .fig {
   font-size: var(--eui-size-figure);
   font-weight: 300;
   letter-spacing: -0.022em;
 }
 
+.readout-value {
+  font-family: var(--eui-font-numbers);
+  font-size: 1.375rem;
+  font-weight: 450;
+  letter-spacing: -0.01em;
+}
+
+.stat-figure .fig,
+.readout-value .fig {
+  font-family: inherit;
+  font-size: 1em;
+  font-weight: inherit;
+  letter-spacing: inherit;
+}
+
 .stat-figure .unit {
   margin-left: 0.28em;
   color: var(--eui-muted);
-  font-size: calc(var(--eui-size-figure) * 0.4);
+  font-family: var(--eui-font-body);
+  font-size: 0.4em;
   font-weight: 450;
   letter-spacing: 0;
 }
 
-.stat-value.is-text .fig {
+.stat-value.is-text {
   font-size: var(--eui-size-xl);
   font-weight: 400;
   letter-spacing: -0.01em;
+}
+
+.stat-value.is-text .unit {
+  font-size: calc(var(--eui-size-figure) * 0.4);
 }
 
 .stat-value.is-none .fig {
@@ -830,16 +846,13 @@ a {
   line-height: 1.2;
 }
 
-.readout-value .fig {
-  font-size: 1.375rem;
-  font-weight: 450;
-  letter-spacing: -0.01em;
-}
-
 .readout-value .unit {
   margin-left: 0.22em;
   color: var(--eui-muted);
+  font-family: var(--eui-font-body);
   font-size: var(--eui-size-xs);
+  font-weight: 400;
+  letter-spacing: 0;
 }
 
 .readout-at {
@@ -969,7 +982,7 @@ td:last-child {
 thead th {
   position: sticky;
   top: 0;
-  background: var(--eui-surface);
+  background: var(--eui-card-background, var(--eui-surface));
   border-bottom: 1px solid var(--eui-border);
   color: var(--eui-muted);
   font-size: var(--eui-size-xs);

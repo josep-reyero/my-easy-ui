@@ -308,9 +308,11 @@ def _cmd_validate(args: argparse.Namespace) -> Result:
         lines.append(report["data"]["note"])
     if report["dashboards"]:
         lines.append(
-            ("All dashboards are valid" + (" and so is their look." if look and (look["files"]["theme"] or
+            ("All dashboards are valid" + (" and so is their look" if look and (look["files"]["theme"] or
                                            look["files"]["stylesheets"] or look["files"].get("app_stylesheets"))
-                                           else ".")) if report["ok"] else
+                                           else "")
+             + (f", with {n_warn} warning{'' if n_warn == 1 else 's'} above to read."
+                if (n_warn := int(report.get("warnings") or 0)) else ".")) if report["ok"] else
             f"Found {report['errors']} problem(s). Fix them and run easy-ui validate again."
         )
     return Result(report, "\n".join(lines), 0 if report["ok"] else 1)
@@ -321,7 +323,7 @@ def _cmd_data_build(args: argparse.Namespace) -> Result:
     if args.keep < 1:
         raise UsageError("--keep must be 1 or more.", hint="For example: easy-ui data build --keep 3")
     res = bundle.build(cfg, keep=args.keep)
-    parts = ", ".join(f"{name} ({t['rows']} rows)" for name, t in res["tables"].items())
+    parts = ", ".join(f"{name} ({t['rows']} row{'' if t['rows'] == 1 else 's'})" for name, t in res["tables"].items())
     if res["unchanged"]:
         text = f"The project's data has not changed since the last build, so the dashboards keep using it: {parts}."
     else:
