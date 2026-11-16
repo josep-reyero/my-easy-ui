@@ -27,7 +27,10 @@ The folder::
     <out>/.easyui-export               a marker, so --force only ever replaces an earlier export
 
 The look is never locked by ``--encrypt`` (a page can only use stylesheets, fonts and pictures that are
-files); the command says which of these files the copy holds.
+files); the command says which of these files the copy holds. Every SVG picture is checked again against
+the drawing-only allowlist (``styles.svg_problem``) before it is written, because a static host serves
+``ui/`` with no session and no sandbox header. Where the host lets you set headers, also send
+``Content-Security-Policy: sandbox`` for ``ui/`` (see "Export" in the README).
 
 The page loads nothing from anywhere else and makes no network request (its
 Content-Security-Policy says ``connect-src 'none'``). It works from any
@@ -435,6 +438,17 @@ def _write_tree(tmp: Path, html: str, js: str, web_dir: Path, look: styles.Style
     for name in VENDOR:
         put(f"assets/vendor/{name}", (web_dir / "assets" / "vendor" / name).read_bytes())
     for rel, data in (look.files() if look is not None else {}).items():
+        if rel.lower().endswith(".svg"):
+            # Checked again here: a static host serves ui/ files with no session and no sandbox header, so a
+            # picture must hold only drawing (a version published before the allowlist check may not).
+            why = styles.svg_problem(data)
+            if why:
+                raise Refused(
+                    f"The picture ui/{rel} was not copied, because it {why}. A static copy cannot protect its "
+                    "readers from a picture that runs or loads something, so no copy was made.",
+                    hint="Save the picture again as a plain SVG (or use .png or .webp), publish, and export again.",
+                    code="export_look_invalid",
+                )
         put(f"ui/{rel}", data)
     put(MARKER, b"Made by easy-ui export. easy-ui export --force may replace this folder.\n")
     return files

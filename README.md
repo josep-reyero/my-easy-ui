@@ -163,10 +163,11 @@ drawn in its own document tree that the project's CSS cannot leave. See
 
 **Sharing a copy.** `easy-ui export --out DIR` writes a self-contained folder (`index.html`
 and its files) with the published dashboards and the numbers they show for one set of control
-values (`--set NAME=VALUE`, `--dashboard NAME`); `--single-file --out FILE.html` writes one HTML
-file instead, to open from the disk or send directly. It needs no server and makes no network
+values (`--set NAME=VALUE`, `--dashboard NAME`). It needs no server and makes no network
 request, so it can be opened from the disk or put on any static host (it asks search engines
-not to index it). The command lists exactly what becomes visible, and nothing else is in it.
+not to index it). The project's look goes with it in `ui/`; every SVG picture in it is checked
+again so that it holds only drawing (no script, link or animation). If the host lets you set
+headers, also send `Content-Security-Policy: sandbox` for the `ui/` folder. The command lists exactly what becomes visible, and nothing else is in it.
 With `--encrypt` the data is locked with AES-256-GCM and the key exists only in the link's
 ending (`#k=...`), which browsers never send to the host:
 
@@ -177,7 +178,7 @@ easy-ui export --out ./share --dashboard overview --set since=2026-01-01 --encry
 What the lock protects against, plainly: someone who finds or copies the files without the
 link (a disk, a backup, a listing on the host). It does **not** protect against whoever serves
 the files: a host could change the page so that it sends the key away the next time someone
-opens the link. Put a locked copy only on a host you trust, or send the single file directly.
+opens the link. Put a locked copy only on a host you trust, or send the folder directly (for example as a zip).
 The page keeps the key only while it is open (never in the browser's storage) and takes it out
 of the address bar, but the browser's history may still keep the whole link.
 

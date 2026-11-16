@@ -228,6 +228,26 @@ def test_theme_css_is_only_custom_properties_light_and_dark():
     ("a.svg", b'<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY x "y">]><svg/>', False),
     ("a.svg", b"<svg><style>@import url(https://tracker.example/x.css);</style></svg>", False),
     ("a.svg", b"not a picture", False),
+    # Malformed-input fixtures: each must be refused whatever spelling it uses (an allowlist parse).
+    ("a.svg", b'<svg xmlns="http://www.w3.org/2000/svg" xmlns:x="http://www.w3.org/2000/svg"><x:script/></svg>', False),
+    ("a.svg", b'<x:svg xmlns:x="http://www.w3.org/2000/svg"><x:foreignObject/></x:svg>', False),
+    ("a.svg", b'<svg xmlns="http://www.w3.org/2000/svg" xmlns:h="http://www.w3.org/1999/xhtml"><h:p/></svg>', False),
+    ("a.svg", b'<svg xmlns="http://www.w3.org/2000/svg"><set attributeName="href" to="#x"/></svg>', False),
+    ("a.svg", b'<svg xmlns="http://www.w3.org/2000/svg"><animate attributeName="fill" to="red"/></svg>', False),
+    ("a.svg", b'<svg xmlns="http://www.w3.org/2000/svg"><use href="&#120;.svg#a"/></svg>', False),
+    ("a.svg", b'<svg xmlns="http://www.w3.org/2000/svg"><style>rect{fill:red}</style></svg>', False),
+    ("a.svg", b'<svg xmlns="http://www.w3.org/2000/svg"><rect style="fill: u\\72l(x.png)"/></svg>', False),
+    ("a.svg", b'<svg xmlns="http://www.w3.org/2000/svg"><rect fill="url(x.svg#g)"/></svg>', False),
+    ("a.svg", b'<svg xmlns="http://www.w3.org/2000/svg"><rect data-x="1"/></svg>', False),
+    ("a.svg", b'<svg xmlns="http://www.w3.org/2000/svg"><?xml-stylesheet href="x.css"?></svg>', False),
+    ("a.svg", b'<svg xmlns="http://www.w3.org/2000/svg"><rect></svg>', False),
+    ("a.svg", b'<svg xmlns="http://www.w3.org/2000/svg"><a href="#x"><rect/></a></svg>', False),
+    # Plain drawings stay accepted: gradients, text, xlink:href fragments, a filter, an XML declaration.
+    ("a.svg", b'<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" '
+              b'xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 8 8"><defs><linearGradient id="g">'
+              b'<stop offset="0" stop-color="#fff"/></linearGradient><filter id="f"><feGaussianBlur stdDeviation="1"/>'
+              b'</filter></defs><use xlink:href="#r"/><rect id="r" style="fill: url(#g)" filter="url(#f)"/>'
+              b'<text x="1" y="6" font-family="serif">Hi</text></svg>', True),
 ])
 def test_asset_types_by_name_and_first_bytes(name, data, ok):
     ctype, why = styles.asset_type(name, data)

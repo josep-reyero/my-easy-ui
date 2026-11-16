@@ -470,18 +470,131 @@ def _read_assets(ui: int, out: StyleFiles, prefix: str) -> None:
 # ---------------------------------------------------------------- assets
 
 
-_SVG_FORBIDDEN = (
-    (re.compile(rb"<!DOCTYPE|<!ENTITY", re.I), "declares a DOCTYPE or entities"),
-    (re.compile(rb"<\s*script", re.I), "contains a script"),
-    (re.compile(rb"<\s*foreignObject", re.I), "contains foreignObject (HTML inside the picture)"),
-    (re.compile(rb"<\?xml-stylesheet", re.I), "loads a stylesheet"),
-    (re.compile(rb"\son[a-z]+\s*=", re.I), "has an event attribute (on...=)"),
-    (re.compile(rb"javascript\s*:", re.I), "contains a javascript: address"),
-    (re.compile(rb"@import", re.I), "imports a stylesheet"),
-    (re.compile(rb"""(?:href|src)\s*=\s*["']\s*(?!#)""", re.I), "links to another file (only #fragment links are allowed)"),
-    (re.compile(rb"""url\(\s*["']?\s*(?!#)""", re.I), "refers to another file with url() (only url(#...) is allowed)"),
-    (re.compile(rb"<\s*(?:iframe|embed|object|use\s[^>]*href\s*=\s*[\"'][^#])", re.I), "embeds other content"),
-)
+SVG_NS = "http://www.w3.org/2000/svg"
+_XLINK_NS = "http://www.w3.org/1999/xlink"
+_XML_NS = "http://www.w3.org/XML/1998/namespace"
+
+# Pictures are checked against an allowlist, not a blocklist: the file is parsed as XML
+# (no DOCTYPE, no entities, no processing instructions), every element must be one of
+# these, in the SVG namespace (or in none), whatever prefix it is written with, and every
+# attribute must be one of _SVG_ATTRIBUTES. Scripts, foreignObject, <style>, <image>,
+# links (<a>) and every animation element (set, animate*, which can rewrite an href) are
+# not on the list, so they are refused however they are spelled.
+_SVG_ELEMENTS = frozenset("""
+svg g defs symbol use title desc path rect circle ellipse line polyline polygon text tspan textPath
+linearGradient radialGradient stop clipPath mask pattern marker filter
+feBlend feColorMatrix feComponentTransfer feComposite feConvolveMatrix feDiffuseLighting feDisplacementMap
+feDistantLight feDropShadow feFlood feFuncA feFuncB feFuncG feFuncR feGaussianBlur feMerge feMergeNode
+feMorphology feOffset fePointLight feSpecularLighting feSpotLight feTile feTurbulence
+""".split())
+_SVG_ATTRIBUTES = frozenset("""
+id class style lang tabindex role aria-label aria-hidden aria-labelledby aria-describedby focusable version
+x y x1 y1 x2 y2 cx cy r rx ry fx fy fr width height viewBox preserveAspectRatio d points pathLength transform
+fill fill-opacity fill-rule stroke stroke-width stroke-linecap stroke-linejoin stroke-miterlimit
+stroke-dasharray stroke-dashoffset stroke-opacity opacity color display visibility overflow
+clip-path clip-rule clipPathUnits mask maskUnits maskContentUnits mask-type
+filter filterUnits primitiveUnits gradientUnits gradientTransform spreadMethod offset stop-color stop-opacity
+patternUnits patternContentUnits patternTransform markerWidth markerHeight markerUnits refX refY orient
+marker-start marker-mid marker-end font-family font-size font-weight font-style font-variant font-stretch
+text-anchor dominant-baseline alignment-baseline baseline-shift letter-spacing word-spacing text-decoration
+writing-mode direction unicode-bidi dx dy rotate textLength lengthAdjust startOffset method spacing side
+vector-effect shape-rendering text-rendering image-rendering color-rendering paint-order mix-blend-mode isolation
+in in2 result stdDeviation flood-color flood-opacity lighting-color mode operator k1 k2 k3 k4 type values
+tableValues slope intercept amplitude exponent order kernelMatrix divisor bias targetX targetY edgeMode
+kernelUnitLength preserveAlpha surfaceScale diffuseConstant specularConstant specularExponent
+azimuth elevation pointsAtX pointsAtY pointsAtZ limitingConeAngle z scale xChannelSelector yChannelSelector
+radius baseFrequency numOctaves seed stitchTiles color-interpolation color-interpolation-filters href
+""".split())
+_URL_FRAGMENT = re.compile(r"url\(\s*(['\"]?)#[A-Za-z_][A-Za-z0-9_.:-]*\1\s*\)", re.I)
+
+
+class _SvgRefused(Exception):
+    pass
+
+
+def _svg_value_problem(local: str, value: str) -> str | None:
+    """Why an attribute value is refused, or None. ``value`` is already decoded (entities resolved)."""
+    if local == "href":
+        if not re.fullmatch(r"#[A-Za-z_][A-Za-z0-9_.:-]*", value.strip()):
+            return "links to another file (only #fragment links are allowed)"
+        return None
+    rest = _URL_FRAGMENT.sub("", value)
+    low = rest.lower()
+    if "url(" in low or "image(" in low or "image-set(" in low:
+        return "refers to another file with url() (only url(#...) is allowed)"
+    if "\\" in rest:
+        return "has an escaped character (\\) in a value, which can hide a link"
+    if "@import" in low or "expression(" in low or "javascript:" in low:
+        return "has a value that loads or runs something"
+    return None
+
+
+def svg_problem(data: bytes) -> str | None:
+    """Why an SVG picture is refused, or None when it holds only plain drawing.
+
+    The file is parsed as XML with a parser that refuses a DOCTYPE, entities and processing
+    instructions; elements and attributes are matched by local name and namespace against an
+    allowlist, so a prefix (``<x:script>``) never changes the outcome.
+    """
+    from xml.parsers import expat
+
+    parser = expat.ParserCreate(encoding="utf-8", namespace_separator=" ")
+    seen_root: list[str] = []
+
+    def split(name: str) -> tuple[str, str]:
+        ns, _sp, local = name.rpartition(" ")
+        return ns, local
+
+    def doctype(*_a):
+        raise _SvgRefused("declares a DOCTYPE or entities")
+
+    def entity(*_a):
+        raise _SvgRefused("declares a DOCTYPE or entities")
+
+    def pi(target, _data):
+        raise _SvgRefused("has a processing instruction (for example a linked stylesheet)")
+
+    def start(name, attrs):
+        ns, local = split(name)
+        if ns not in ("", SVG_NS):
+            raise _SvgRefused(f"has an element from another vocabulary ({local})")
+        if local not in _SVG_ELEMENTS:
+            raise _SvgRefused(f"has a <{local}> element (only drawing elements are allowed: no script, "
+                              "style, image, link or animation)")
+        if not seen_root:
+            if local != "svg":
+                raise _SvgRefused("does not start with an <svg> element")
+            seen_root.append(local)
+        for key, value in attrs.items():
+            ans, alocal = split(key)
+            if ans == _XLINK_NS and alocal == "href":
+                pass
+            elif ans == _XML_NS and alocal in ("space", "lang"):
+                continue
+            elif ans:
+                raise _SvgRefused(f"has an attribute from another vocabulary ({alocal})")
+            elif alocal not in _SVG_ATTRIBUTES:
+                raise _SvgRefused(f"has the attribute {alocal}, which is not a drawing attribute")
+            why = _svg_value_problem(alocal, value)
+            if why:
+                raise _SvgRefused(why)
+
+    parser.StartDoctypeDeclHandler = doctype
+    parser.EntityDeclHandler = entity
+    parser.UnparsedEntityDeclHandler = entity
+    parser.NotationDeclHandler = entity
+    parser.ExternalEntityRefHandler = lambda *_a: (_ for _ in ()).throw(_SvgRefused("declares a DOCTYPE or entities"))
+    parser.ProcessingInstructionHandler = pi
+    parser.StartElementHandler = start
+    try:
+        parser.Parse(data, True)
+    except _SvgRefused as e:
+        return str(e)
+    except expat.ExpatError as e:
+        return f"is not well-formed XML ({expat.ErrorString(e.code)}, line {e.lineno})"
+    if not seen_root:
+        return "does not hold an <svg> element"
+    return None
 
 
 def asset_type(name: str, data: bytes) -> tuple[str | None, str | None]:
@@ -508,9 +621,11 @@ def asset_type(name: str, data: bytes) -> tuple[str | None, str | None]:
         if not (body.startswith(b"<svg") or body.startswith(b"<?xml") or body.startswith(b"<!--")) \
                 or b"<svg" not in body:
             return None, f"{name} does not look like an SVG picture (it should start with <svg or <?xml)."
-        for rx, why in _SVG_FORBIDDEN:
-            if rx.search(data):
-                return None, (f"{name} {why}, which easy-ui does not allow in a picture.")
+        why = svg_problem(data)
+        if why:
+            return None, (f"{name} was refused because it {why}. A picture may hold only drawing, never anything "
+                          "that runs or loads. Save it again as a plain SVG (shapes, paths, text and gradients only), "
+                          "or use a .png or .webp picture instead.")
         return ctype, None
     if not ok[suffix]:
         kind = {".woff2": "a WOFF2 font", ".png": "a PNG picture", ".jpg": "a JPEG picture", ".jpeg": "a JPEG picture",

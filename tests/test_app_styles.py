@@ -217,3 +217,31 @@ def test_an_apps_theme_is_listed_and_can_be_used(demo_app, monkeypatch):
     assert (demo_app.app_dir / "ui" / "theme.yaml").read_text() == (tdir / "night.yaml").read_text()
     code, data = run_cli_json("theme", "use", f"{APP}/nope", "--force")
     assert code != 0 and "has a theme called" in data["error"]["message"]
+
+
+# ---------------------------------------------------------------- pictures that are more than drawing
+
+PREFIXED_SCRIPT_SVG = (b'<svg xmlns="http://www.w3.org/2000/svg" xmlns:x="http://www.w3.org/2000/svg">'
+                       b'<x:script/></svg>')
+
+
+def test_an_apps_picture_with_a_prefixed_script_is_refused(demo_app):
+    """A malformed-input fixture: the prefix does not hide the element from the check."""
+    (demo_app.app_dir / SLEEP / "assets").mkdir(exist_ok=True)
+    (demo_app.app_dir / SLEEP / "assets" / "moon.svg").write_bytes(PREFIXED_SCRIPT_SVG)
+    res = styles.check(styles.read_project_look(demo_app.config()))
+    assert not res.ok
+    assert any("moon.svg" in (e.get("file") or "") + e["problem"] for e in res.errors)
+
+
+def test_an_export_never_writes_a_picture_that_is_more_than_drawing(demo_app, tmp_path):
+    """Even a look that got past the check (an older published version) is checked again before it is copied."""
+    from easyui import export
+
+    bad = styles.Blob(path="assets/x.svg", label="ui/assets/x.svg", data=PREFIXED_SCRIPT_SVG,
+                      sha256="0" * 64)
+    look = styles.StyleSet(assets={"x.svg": bad}, types={"x.svg": "image/svg+xml"})
+    with pytest.raises(Refused) as e:
+        export._write_tree(tmp_path / "t", "<html></html>", "", export.WEB_DIR, look)
+    assert "ui/assets/x.svg" in str(e.value) and "no copy was made" in str(e.value)
+    assert not (tmp_path / "t" / "ui" / "assets" / "x.svg").exists()
