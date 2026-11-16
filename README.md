@@ -61,7 +61,7 @@ dashboards = ["overview"]        # optional: menu order; the first is the landin
 refresh_after = ["sync"]         # optional, read by mes: jobs after which it runs easy-ui data build
 ```
 
-easy-ui reads only `[project]` and `[ui]`; the other tables (`[apps]`, `[jobs]`, `[storage]`)
+`easy-ui` reads only `[project]` and `[ui]`; the other tables (`[apps]`, `[jobs]`, `[storage]`)
 belong to [my-easy-software](https://github.com/josep-reyero/my-easy-software). An old `app.toml` gets a message saying how to rename it.
 
 ```sh
@@ -172,7 +172,7 @@ On your own computer:
   data_dir = "~/Documents/fitness-archive"
   ```
 
-  easy-ui only reads it.
+  `easy-ui` only reads it.
 - easy-ui's own folder (the *ui folder*): `~/.local/state/mes/<project>/ui/` (`MES_STATE_HOME`
   changes the base; `EASYUI_STATE_HOME`, mostly for tests, makes it `$EASYUI_STATE_HOME/<project>/`), with `data/` (the dashboard data copies and the
   `current` link), `specs/` (published dashboard versions) and `project.json` (the name, title,
