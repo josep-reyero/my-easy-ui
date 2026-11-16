@@ -24,7 +24,7 @@ whole app. In order, for each HTTP request it:
    a strict Content-Security-Policy, ``X-Content-Type-Options: nosniff``,
    ``Referrer-Policy: no-referrer``, ``Cross-Origin-Opener-Policy`` and
    ``Cross-Origin-Resource-Policy: same-origin``, a ``Permissions-Policy``
-   denying every feature, ``X-Frame-Options: DENY``,
+   denying every feature except passkeys for this site itself, ``X-Frame-Options: DENY``,
    ``Cache-Control: no-store`` on ``/api/`` responses and HSTS over HTTPS.
 7. Turns any unexpected exception into a plain JSON 500 without a stack trace
    or file path (the details go to the server log only).
@@ -75,11 +75,11 @@ PERMISSIONS_POLICY = ", ".join(
         "accelerometer", "autoplay", "bluetooth", "camera",
         "display-capture", "encrypted-media", "fullscreen", "gamepad", "geolocation", "gyroscope", "hid",
         "idle-detection", "local-fonts", "magnetometer", "microphone", "midi", "payment",
-        "picture-in-picture", "publickey-credentials-create", "publickey-credentials-get",
-        "screen-wake-lock", "serial", "storage-access", "usb", "web-share", "window-management",
+        "picture-in-picture", "screen-wake-lock", "serial", "storage-access", "usb", "web-share", "window-management",
         "xr-spatial-tracking",
     )
-)  # fmt: skip
+) + ", publickey-credentials-create=(self), publickey-credentials-get=(self)"  # fmt: skip
+# Passkeys (WebAuthn) are the one browser feature the page uses, and only for this site itself.
 HSTS = "max-age=31536000"
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]"})
 DEFAULT_MAX_BODY = 64 * 1024

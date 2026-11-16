@@ -1,6 +1,6 @@
 """Publishing dashboards: immutable numbered versions, rollback, and reading them back.
 
-``easy-ui publish`` reads every dashboard in the app's ``ui/dashboards/``,
+``easy-ui publish`` reads every dashboard in the project's ``ui/dashboards/``,
 validates it against the CURRENT data bundle (the structure, then each query is
 actually prepared in the sandbox and every column a component names is
 checked) and only when everything is valid stores the files as a new,
@@ -102,7 +102,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from easyui import bundle, paths, spec
-from easyui.appconfig import AppConfig
+from easyui.appconfig import AppConfig, write_snapshot
 from easyui.errors import (
     EasyUIError,
     NotFound,
@@ -434,7 +434,7 @@ def _locked(st: paths.StatePaths) -> Iterator[None]:
             fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise TemporaryFailure(
-                "Another publish or rollback for this app is running right now, so this one did not start.",
+                "Another publish or rollback for this project is running right now, so this one did not start.",
                 hint="Wait a moment and try again.",
             ) from None
         yield
@@ -592,7 +592,9 @@ def _publish_files(
             "dashboards": dashboards,
         }
         vd = _versions_dir(st)
-        vd.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # 0750 on a server, where the web account reads the published versions through its group.
+        st.specs.mkdir(mode=0o700, parents=True, exist_ok=True)
+        paths.make_dir(vd, paths.dir_mode(st.root))
         staging = st.specs / f"{_TMP_PREFIX}{secrets.token_hex(6)}"
         try:
             staging.mkdir(mode=0o700)
@@ -601,12 +603,14 @@ def _publish_files(
             for f in files:
                 fd = os.open(ddir / f"{f.slug}.yaml", os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC, 0o444)
                 try:
+                    os.fchmod(fd, 0o444)  # not left to the umask: the web account (group) reads it on a server
                     os.write(fd, f.data)
                     os.fsync(fd)
                 finally:
                     os.close(fd)
             mfd = os.open(staging / "manifest.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC, 0o444)
             try:
+                os.fchmod(mfd, 0o444)
                 os.write(mfd, (json.dumps(manifest, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
                 os.fsync(mfd)
             finally:
@@ -662,13 +666,15 @@ def publish(config: AppConfig, *, note: str | None = None, keep: int = KEEP_VERS
         if p.is_symlink():
             problems.append(_problem(paths.display_path(p, config.app_dir), f"{paths.display_path(p, config.app_dir)} is "
                                      "a link, so easy-ui does not read dashboards through it.",
-                                     "Make it a real folder inside the app."))
+                                     "Make it a real folder inside the project."))
     files: list[SourceFile] = []
     notes: list[str] = []
     if not problems:
         files, problems, notes = read_dashboard_dir(config.dashboards_dir, label_prefix="ui/dashboards/")
-    return _publish_files(config.state, config.name, files, problems, note=note, keep=keep, now=now,
-                          source="working folder", notes=notes)
+    result = _publish_files(config.state, config.name, files, problems, note=note, keep=keep, now=now,
+                            source="working folder", notes=notes)
+    write_snapshot(config)
+    return result
 
 
 # ---------------------------------------------------------------- archives
@@ -931,7 +937,7 @@ def restore_files(config: AppConfig, version: int | str | None = None, *, now: _
     for p in (config.app_dir / "ui", ddir):
         if p.is_symlink():
             raise Refused(f"{paths.display_path(p, config.app_dir)} is a link, so easy-ui does not write through it.",
-                          hint="Make it a real folder inside the app.", code="link_refused")
+                          hint="Make it a real folder inside the project.", code="link_refused")
     ddir.mkdir(parents=True, exist_ok=True)
     files, _problems, _notes = read_dashboard_dir(ddir, label_prefix="ui/dashboards/")
     moved: list[str] = []

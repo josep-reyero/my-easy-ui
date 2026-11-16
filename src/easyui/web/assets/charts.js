@@ -35,6 +35,10 @@ function fontFamily() {
   return getComputedStyle(document.body).fontFamily || "system-ui, sans-serif";
 }
 
+function isTrue(v) {
+  return v === true || v === 1 || v === "1" || v === "true" || v === "yes";
+}
+
 export class Chart extends Frame {
   constructor(comp, ctx) {
     super(comp, ctx, "panel");
@@ -48,7 +52,8 @@ export class Chart extends Frame {
   }
 
   requiredColumns() {
-    return [this.comp.x, ...(this.comp.y || [])];
+    const partial = this.comp.partial && this.comp.partial !== "last" ? [this.comp.partial] : [];
+    return [this.comp.x, ...(this.comp.y || []), ...partial];
   }
 
   loadingView() {
@@ -71,19 +76,45 @@ export class Chart extends Frame {
     const years = dates ? new Set(xs.filter(Boolean).map((x) => x.slice(0, 4))) : new Set();
     const isDateTime = dates && xs.some((x) => typeof x === "string" && /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(x));
     let max = 0;
+    let lo = null;
+    let hi = null;
     if (this.comp.type === "bar" && this.comp.stacked) {
       for (let i = 0; i < xs.length; i += 1) {
         max = Math.max(max, series.reduce((sum, s) => sum + Math.abs(s.values[i] ?? 0), 0));
       }
+      lo = 0;
+      hi = max;
     } else {
-      for (const s of series) for (const v of s.values) if (v !== null) max = Math.max(max, Math.abs(v));
+      for (const s of series) {
+        for (const v of s.values) {
+          if (v === null) continue;
+          max = Math.max(max, Math.abs(v));
+          lo = lo === null ? v : Math.min(lo, v);
+          hi = hi === null ? v : Math.max(hi, v);
+        }
+      }
     }
-    return { xs, series, dates, spansYears: years.size > 1, isDateTime, max, truncated };
+    // Rows of a period that is still in progress (partial: last, or a column that is true for them).
+    let partial = xs.map(() => false);
+    if (this.comp.partial === "last") {
+      if (xs.length) partial[xs.length - 1] = true;
+    } else if (this.comp.partial) {
+      const pi = columns.indexOf(this.comp.partial);
+      partial = rows.map((r) => isTrue(r[pi]));
+    }
+    return { xs, series, dates, spansYears: years.size > 1, isDateTime, max, lo, hi, partial, truncated };
   }
 
   xText(x) {
     if (this.data.dates) return display(this.data.isDateTime ? "datetime" : "date", x);
     return display(null, x);
+  }
+
+  /** The x label with "so far" for a period still in progress. */
+  atText(i) {
+    const x = this.data.xs[i];
+    const text = x === null || x === undefined ? "" : this.xText(x);
+    return this.data.partial[i] ? `${text} · so far` : text;
   }
 
   valueText(v) {
@@ -135,6 +166,7 @@ export class Chart extends Frame {
    * point for a date axis; nothing for categories ("walk" is not "the latest").
    */
   restIndex() {
+    if ((this.comp.readout || "latest") !== "latest") return -1;
     return this.data.dates ? this.lastIndex() : -1;
   }
 
@@ -169,6 +201,9 @@ export class Chart extends Frame {
     const motion = !prefersReducedMotion();
     const axisLabel = { color: p.ink2, fontSize: 11, fontFamily: fontFamily(), margin: 10 };
     const yFmt = axisFormatter(this.comp.format, max);
+    const unitName = this.comp.unit || null;
+    const partial = this.data.partial;
+    const anyPartial = partial.some(Boolean);
     return {
       animation: motion,
       animationDuration: 450,
@@ -176,7 +211,7 @@ export class Chart extends Frame {
       animationEasing: "cubicOut",
       textStyle: { fontFamily: fontFamily() },
       color: p.series,
-      grid: { left: 4, right: 8, top: 14, bottom: 4, containLabel: true },
+      grid: { left: 4, right: 8, top: unitName ? 28 : 14, bottom: 4, containLabel: true },
       tooltip: {
         trigger: "axis",
         showContent: false,
@@ -201,13 +236,18 @@ export class Chart extends Frame {
         type: "value",
         scale: type === "line",
         splitNumber: 3,
-        ...this.stepOptions(type, max),
+        // The unit, once, above the axis ("bpm"), rather than on every label.
+        name: unitName,
+        nameLocation: "end",
+        nameGap: 12,
+        nameTextStyle: { ...axisLabel, align: "left", padding: [0, 0, 0, -4] },
+        ...this.stepOptions(type),
         axisLine: { show: false },
         axisTick: { show: false },
         splitLine: { lineStyle: { color: p.grid, width: 1 } },
         axisLabel: { ...axisLabel, formatter: (v) => yFmt(v) },
       },
-      series: series.map((s, i) => {
+      series: series.flatMap((s, i) => {
         const color = p.series[i % p.series.length];
         const base = {
           name: s.name,
@@ -215,6 +255,8 @@ export class Chart extends Frame {
           color,
         };
         if (bar) {
+          // Bars of a period still in progress are drawn lighter.
+          if (anyPartial) base.data = s.values.map((v, j) => (partial[j] ? { value: v, itemStyle: { opacity: 0.4 } } : v));
           return {
             ...base,
             type: "bar",
@@ -226,7 +268,7 @@ export class Chart extends Frame {
             itemStyle: { color, borderRadius: this.comp.stacked && i < series.length - 1 ? 0 : [3, 3, 0, 0] },
           };
         }
-        return {
+        const line = {
           ...base,
           type: "line",
           showSymbol: false,
@@ -239,15 +281,42 @@ export class Chart extends Frame {
           itemStyle: { color, borderColor: p.surface, borderWidth: 2 },
           areaStyle: type === "area" ? { color, opacity: series.length > 1 ? 0.1 : 0.16 } : undefined,
         };
+        if (!anyPartial) return line;
+        // A period still in progress: the line into it is dashed and its point is an open circle.
+        const solid = s.values.map((v, j) => (partial[j] ? null : v));
+        const dashed = s.values.map((v, j) => {
+          if (partial[j]) return { value: v, symbol: "circle", symbolSize: 7, itemStyle: { color: p.surface, borderColor: color, borderWidth: 2 } };
+          if (j + 1 < partial.length && partial[j + 1]) return { value: v, symbol: "none" };
+          return null;
+        });
+        return [
+          { ...line, data: solid },
+          {
+            ...line,
+            name: `${s.name} (so far)`,
+            data: dashed,
+            showSymbol: true,
+            sampling: undefined,
+            lineStyle: { ...line.lineStyle, type: [4, 4] },
+            areaStyle: type === "area" ? { color, opacity: 0.06 } : undefined,
+          },
+        ];
       }),
     };
   }
 
-  // Round ticks for times (0, 30 min, 1 h) with the top of the axis on a whole step.
-  stepOptions(type, max) {
-    const step = type === "line" ? null : axisStep(this.comp.format, max);
-    if (!step) return {};
-    return { interval: step, min: 0, max: (ext) => Math.max(step, Math.ceil(ext.max / step) * step) };
+  // The step setting, or round ticks for times and distances (0, 30 min, 1 h; 0, 20 km, 40 km), with the ends
+  // of the axis on whole steps. Line charts without a step keep their own zoomed-in scale.
+  stepOptions(type) {
+    const { max, lo, hi } = this.data;
+    const chosen = Number(this.comp.step) > 0 ? Number(this.comp.step) : null;
+    const step = chosen || (type === "line" ? null : axisStep(this.comp.format, max));
+    if (!step || lo === null) return {};
+    const fromZero = type !== "line";
+    const bottom = fromZero ? Math.min(0, Math.floor(lo / step) * step) : Math.floor(lo / step) * step;
+    const top = Math.max(bottom + step, Math.ceil(hi / step) * step);
+    if ((top - bottom) / step > 40) return {}; // a step far too small for these values: let the chart choose
+    return { interval: step, min: bottom, max: top };
   }
 
   redraw() {
@@ -283,8 +352,11 @@ export class Chart extends Frame {
       }
       return;
     }
-    const x = this.index >= 0 ? xs[this.index] : null;
-    const at = x === null || x === undefined ? "" : this.xText(x);
+    if ((this.comp.readout || "latest") === "none") {
+      fill(this.readout);
+      return;
+    }
+    const at = this.atText(this.index);
     if (series.length === 1) {
       const text = display(this.comp.format, series[0].values[this.index] ?? null);
       let [num, unit] = splitUnit(text);
@@ -311,7 +383,7 @@ export class Chart extends Frame {
     if (xs.length) {
       parts.push(`${xs.length} ${xs.length === 1 ? "value" : "values"} from ${this.xText(xs[0])} to ${this.xText(xs[xs.length - 1])}.`);
       const latest = series.map((s) => `${series.length > 1 ? `${s.name} ` : ""}${this.valueText(s.values[last] ?? null)}`).join(", ");
-      parts.push(`Latest, ${this.xText(xs[last])}: ${latest}.`);
+      parts.push(`Latest, ${this.atText(last)}: ${latest}.`);
     }
     parts.push("Use View as table for every value.");
     this.canvas.setAttribute("aria-label", parts.join(" "));
@@ -342,7 +414,7 @@ export class Chart extends Frame {
     const order = xs.map((_, i) => i);
     if (dates) order.reverse();
     const body = order.map((i) => h("tr", null, [
-      h("th", { attrs: { scope: "row" }, text: this.xText(xs[i]) }),
+      h("th", { attrs: { scope: "row" }, text: this.atText(i) }),
       ...series.map((s) => h("td", { class: "num", text: this.valueText(s.values[i]) })),
     ]));
     if (this.tableCue) this.tableCue.disposeCue();

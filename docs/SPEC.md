@@ -1,6 +1,6 @@
 # Dashboard format: `easy-ui/v1`
 
-A dashboard is one YAML file in the app's `ui/dashboards/` folder. The file name is the page
+A dashboard is one YAML file in the project's `ui/dashboards/` folder. The file name is the page
 address: `ui/dashboards/training.yaml` is the dashboard `training`. Names use lowercase letters,
 digits and `-` (up to 41 characters, starting with a letter or digit).
 
@@ -12,17 +12,23 @@ questions change.
 The quickest way to see the whole vocabulary from the command line is `easy-ui components --json`.
 To see what data there is, run `easy-ui tables`.
 
-## The app's settings (`app.toml`)
+## The project's settings (`project.toml`)
 
-easy-ui reads `[app]` (`name`, `title`) and `[ui]` from the app's `app.toml`. Every other table
-(for example `[jobs]`) belongs to other tools and is ignored. Unknown keys in `[ui]` are errors.
+easy-ui reads `[project]` (`name`, `title`, `version`) and `[ui]` from the project's
+`project.toml`. Every other table (`[apps]`, `[jobs]`, `[storage]`) belongs to my-easy-software
+and is ignored. Unknown keys in `[ui]` are errors.
 
 ```toml
+[project]
+name = "fitness"
+title = "My fitness"
+
 [ui]
-data = "fitness.sqlite"                    # the app's SQLite file, inside its data folder
+data = "fitness.sqlite"                    # the project's SQLite file, inside its data folder
 tables = ["days", "activities"]            # only these tables/views are copied for dashboards
-accent = "#2f6fdf"                         # optional: the app's colour
-dashboards = ["overview", "sleep"]         # optional: menu order; the first opens at the start
+accent = "#2f6fdf"                         # optional: the project's colour
+dashboards = ["overview", "sleep"]         # optional: menu order; the first is the landing page
+refresh_after = ["sync"]                   # optional, for mes: rebuild the data after these jobs
 ```
 
 Dashboards not listed under `dashboards` follow the listed ones, by name. `easy-ui validate`
@@ -160,7 +166,7 @@ Rules (checked by `easy-ui validate` and again by the server for every request):
 
 - exactly one statement, starting with `SELECT` or `WITH` (or `VALUES`); a trailing `;` is fine;
 - parameters only as `:name`, and every `:name` must be declared under `params`;
-- only the tables listed in `app.toml` `[ui] tables` exist (views are copied as tables);
+- only the tables listed in `project.toml` `[ui] tables` exist (views are copied as tables);
 - no `ATTACH`, `PRAGMA` (also not `pragma_*` functions), no writes or schema changes, no
   `sqlite_master`, `dbstat` or extension functions such as `load_extension` or `readfile`;
 - text values go in single quotes (`'run'`); double quotes are for names (`"Distance"`);
@@ -218,11 +224,26 @@ A line chart (or with the area under each line filled).
 | `x` | yes | Column for the horizontal axis (a date or a category). |
 | `y` | yes | A column, or a list of up to 8 columns, one series each. |
 | `format` | no | Format for the y values. |
-| `unit` | no | Short unit shown on the axis, e.g. `km`, `bpm` (up to 12 characters). |
+| `unit` | no | Short unit, e.g. `bpm` (up to 12 characters): written once above the axis and after values in the readout and table. |
+| `step` | no | The gap between the lines across the chart, in the query's own numbers (for `distance` in metres, `5000` is a line every 5 km). Default: round steps from the values (0, 20 km, 40 km; 0, 30 min, 1 h). A step that would draw more than 40 lines is ignored. |
+| `readout` | no | The value in the chart's heading: `latest` (default: the newest point on a date axis, or the one under the pointer), `pointer` (only while pointing at the chart) or `none`. |
+| `partial` | no | A period still in progress (this week so far): `last` (the last row) or a column that is true (`1`) for such rows. Drawn with a dashed line into an open point; the readout and the table say "so far". |
+
+```yaml
+- type: bar
+  title: Distance per week
+  query: weekly
+  x: week
+  y: Distance
+  format: distance
+  step: 10000        # a line every 10 km
+  partial: last      # this week is not over yet
+```
 
 ### `bar`
 
-Same settings as `line`, plus `stacked` (`true` / `false`, default `false`).
+Same settings as `line`, plus `stacked` (`true` / `false`, default `false`). A `partial` bar is
+drawn lighter.
 
 ### `table`
 
@@ -232,6 +253,7 @@ Same settings as `line`, plus `stacked` (`true` / `false`, default `false`).
 | `query` | yes | A query name. |
 | `columns` | no | Which columns to show, in order: a column name, or `{column, label, format}`. Default: all. |
 | `limit` | no | Show at most this many rows (1 to 5000). |
+| `phone` | no | On narrow screens (560 px and less): `cards` (default: each row as a small card, the first column as its heading, then one "label  value" line per column) or `scroll` (the table as it is, scrolled sideways). |
 
 ### `text`
 
@@ -337,14 +359,16 @@ into DOM nodes; it never contains HTML.
        "format": "distance", "delta": null, "delta_format": null, "better": null,
        "hint": "Everything you walked, ran and rode."},
       {"id": "r1c1", "type": "line", "title": "Distance per day", "query": "daily", "x": "day",
-       "y": ["Distance"], "format": "distance", "unit": null},
+       "y": ["Distance"], "format": "distance", "unit": null, "step": null, "readout": "latest",
+       "partial": null},
       {"id": "r1c2", "type": "bar", "title": "Steps", "query": "daily", "x": "day",
-       "y": ["Steps"], "format": "integer", "unit": null, "stacked": false}
+       "y": ["Steps"], "format": "integer", "unit": null, "stacked": false, "step": null,
+       "readout": "latest", "partial": null}
     ],
     [
       {"id": "r2c0", "type": "table", "title": "Recent", "query": "daily", "limit": 20,
        "columns": [{"column": "day", "label": "Day", "format": "date"},
-                   {"column": "Distance", "label": "Distance", "format": null}]},
+                   {"column": "Distance", "label": "Distance", "format": null}], "phone": "cards"},
       {"id": "r2c1", "type": "text", "title": null, "blocks": [
         {"t": "h", "level": 2, "c": [{"t": "text", "v": "How to read this page"}]},
         {"t": "p", "c": [

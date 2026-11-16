@@ -1,7 +1,7 @@
 """The query sandbox: the only way easy-ui runs SQL for a dashboard.
 
 Every dashboard query runs against an immutable data bundle (see
-``easyui.bundle``), never against the app's own database, and only through
+``easyui.bundle``), never against the project's own database, and only through
 these layers:
 
 1. Static check of the SQL text (``scan_sql``): exactly one statement that
@@ -531,7 +531,7 @@ class Sandbox:
             return QueryError(
                 f'{_label(name)}reads a table called "{table}", which is not in the dashboard data.{did}',
                 hint=f"The tables available are: {', '.join(sorted(self.tables)) or '(none)'}. To add one, list it "
-                "under [ui] tables in app.toml and run: easy-ui data build",
+                "under [ui] tables in project.toml and run: easy-ui data build",
                 detail=msg,
             )
         m = re.match(r'no such column: "(.*)" - should this be a string literal', msg, re.S)

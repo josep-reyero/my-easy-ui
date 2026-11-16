@@ -226,25 +226,25 @@ def test_deeply_nested_json_is_a_400(demo_app):
 @pytest.mark.parametrize("user", ["root", "nobody", "daemon", "www-data"])
 def test_units_refuse_administrator_and_shared_accounts(user):
     with pytest.raises(UsageError) as e:
-        units.render_units("demo", user=user, app_path="/srv/demo")
+        units.check_service_user(user)
     assert e.value.code == "account_refused"
 
 
 def test_units_refuse_shared_socket_owner_and_world_writable_program():
     with pytest.raises(UsageError):
-        units.render_units("demo", app_path="/srv/demo", socket_owner="nobody")
+        units.render_units("demo", socket_owner="nobody")
     for exe in ("/tmp/evil/easy-ui", "/var/tmp/easy-ui", "/dev/shm/easy-ui"):
         with pytest.raises(UsageError) as e:
-            units.render_units("demo", app_path="/srv/demo", exec_path=exe)
+            units.render_units("demo", exec_path=exe)
         assert e.value.code == "path_refused"
-    assert "SocketUser=root" in units.render_units("demo", app_path="/srv/demo")["easy-ui-demo.socket"]
+    assert "SocketUser=root" in units.render_units("demo")["mes-demo-web.socket"]
 
 
 def test_units_carry_the_allowed_host_names():
-    svc = units.render_units("demo", app_path="/srv/demo", allow_hosts=["Box.Example.ts.net"])["easy-ui-demo.service"]
+    svc = units.render_units("demo", allow_hosts=["Box.Example.ts.net"])["mes-demo-web.service"]
     assert 'Environment="EASYUI_ALLOW_HOSTS=box.example.ts.net"' in svc
     with pytest.raises(UsageError):
-        units.render_units("demo", app_path="/srv/demo", allow_hosts=["bad host\nExecStart=/bin/sh"])
+        units.render_units("demo", allow_hosts=["bad host\nExecStart=/bin/sh"])
 
 
 # ---------------------------------------------------------------- preview
@@ -334,14 +334,14 @@ def test_dashboards_follow_the_app_order(demo_app):
     [('"overview"', "must be a list"), ('["Overview"]', "not a dashboard name"), ('["a", "a"]', "more than once")],
 )
 def test_bad_dashboard_order(tmp_path, value, needle):
-    (tmp_path / "app.toml").write_text(f'[app]\nname = "demo"\n[ui]\ndashboards = {value}\n')
+    (tmp_path / "project.toml").write_text(f'[project]\nname = "demo"\n[ui]\ndashboards = {value}\n')
     with pytest.raises(ConfigError) as e:
         appconfig.load(tmp_path)
     assert needle in e.value.message
 
 
 def test_validate_notes_an_order_name_without_a_file(built_app):
-    toml = built_app.app_dir / "app.toml"
+    toml = built_app.app_dir / "project.toml"
     toml.write_text(toml.read_text().replace('dashboards = ["overview", "activities"]', 'dashboards = ["overveiw"]'))
     code, data = run_cli_json("validate")
     assert code == 0 and any("overveiw" in n for n in data["notes"])
@@ -494,7 +494,7 @@ def test_demo_command_writes_a_working_app(tmp_path, monkeypatch):
     code, data = run_cli_json("demo", str(tmp_path / "d"))
     assert code == 0
     app = Path(data["app_dir"])
-    assert (app / "app.toml").is_file() and (app / "ui" / "fixtures" / "demo.sqlite").is_file()
+    assert (app / "project.toml").is_file() and (app / "ui" / "fixtures" / "demo.sqlite").is_file()
     monkeypatch.setenv("MES_DATA_HOME", data["env"]["MES_DATA_HOME"])
     monkeypatch.setenv("EASYUI_STATE_HOME", data["env"]["EASYUI_STATE_HOME"])
     cfg = appconfig.load(app)

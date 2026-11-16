@@ -49,16 +49,19 @@ seconds). So:
 
 - An attacker without a device token can slow down only the untrusted bucket.
   The owner's usual browsers keep their own bucket and are not affected at all.
-- The known limit: while someone keeps sending wrong passwords (every few
-  milliseconds, all the time), a browser that has never signed in shares their
-  bucket and is refused almost every time, for as long as that goes on. A new
-  device and an attacker look the same to the server, so it cannot let one in
-  and not the other without also letting the attacker guess faster. The way
-  back in is a browser that has signed in before, or ``easy-ui set-password``
-  on the server (which clears every wait; an attacker who keeps going starts a
-  new one). The message on the sign-in page says so, and every failed sign-in
-  and every burst of refused attempts is written to the server log (and
-  counted by ``easy-ui check``), so an attack can be seen.
+- While someone keeps sending wrong passwords (every few milliseconds, all
+  the time), a browser that has never signed in shares their bucket and its
+  *password* attempts are refused almost every time. A new device and an
+  attacker look the same to the server here. This no longer locks the owner
+  out: passkey sign-in (``sign_in_passkey``) is never throttled, because a
+  passkey cannot be guessed (each answer is a signature over a fresh,
+  single-use challenge, checked against a stored public key). Recovery codes
+  (``sign_in_recovery``) are throttled like passwords but in their own
+  ``recovery:`` buckets, so a password flood does not block them either and
+  they are never cheaper to guess (80-bit codes). ``easy-ui set-password`` on
+  the server still clears every wait. Every failed sign-in and every burst of
+  refused attempts is written to the server log (and counted by
+  ``easy-ui check``), so an attack can be seen.
 - An attacker gets at most about 720 guesses a day (one per 2 minutes), which
   is hopeless against a 12-character password, and the server is only
   reachable on the owner's private network in the first place.
@@ -114,7 +117,14 @@ from typing import Any
 from argon2 import PasswordHasher, Type, extract_parameters
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 
-from easyui.errors import NeedsHuman, SignInRequired, TemporaryFailure, UsageError
+from easyui.errors import (
+    NeedsHuman,
+    NotAllowed,
+    SignInRequired,
+    TemporaryFailure,
+    UsageError,
+)
+from easyui.passkeys import PasskeyStore, RecoveryCodes
 from easyui.sessions import (
     Session,
     SessionStore,
@@ -169,12 +179,12 @@ class TooManyAttempts(TemporaryFailure):
     http_status = 429
     default_code = "slow_down"
 
-    def __init__(self, retry_after: float, *, new_browser: bool = False) -> None:
+    def __init__(self, retry_after: float, *, new_browser: bool = False, what: str = "passwords") -> None:
         self.retry_after = max(1, math.ceil(retry_after))
         super().__init__(
-            f"There were several wrong passwords in a row, so sign-in is paused for {self.retry_after} "
-            "more second(s). This makes guessing the password far too slow to work.",
-            hint=f"Wait {self.retry_after} second(s), then try again. "
+            f"There were several wrong {what} in a row, so this way of signing in is paused for {self.retry_after} "
+            f"more second(s). This makes guessing far too slow to work. Signing in with a passkey still works.",
+            hint=f"Wait {self.retry_after} second(s), then try again, or use a passkey. "
             + (NEW_BROWSER_HINT if new_browser else FORGOT_HINT),
         )
 
@@ -270,8 +280,17 @@ def _no_terminal() -> NeedsHuman:
     return NeedsHuman(
         "Setting the sign-in password needs the person to type it on this computer's terminal, so it cannot be "
         "done from here (there is no terminal to type into). This keeps the password known only to them.",
-        hint="Ask the person to open a terminal on the server, go to the app's folder and run: easy-ui set-password",
+        hint="Ask the person to open a terminal on the server, go to the project's folder and run: easy-ui set-password",
     )
+
+
+def open_terminal() -> Any:
+    """The terminal for writing to the person only (never stdout, which an agent may read), or None."""
+    try:
+        fd = os.open("/dev/tty", os.O_WRONLY | os.O_NOCTTY)
+    except OSError:
+        return None
+    return os.fdopen(fd, "w", encoding="utf-8")
 
 
 def _terminal_available() -> bool:
@@ -368,7 +387,11 @@ class Throttle:
             rec = self._live(buckets.get(bucket), now) or {"failures": 0, "last": 0.0, "until": 0.0}
             left = max(0.0, min(float(rec.get("until", 0)) - now, cap))
             if left > 0:
-                raise TooManyAttempts(left, new_browser=bucket == UNTRUSTED)
+                raise TooManyAttempts(
+                    left,
+                    new_browser=bucket.endswith(UNTRUSTED),
+                    what="recovery codes" if bucket.startswith("recovery:") else "passwords",
+                )
             n = int(rec.get("failures", 0)) + 1
             buckets[bucket] = {"failures": n, "last": now, "until": now + delay_for(n, cap)}
             buckets = {k: v for k, v in buckets.items() if self._live(v, now)}
@@ -480,7 +503,7 @@ class Authenticator:
                 "%d sign-in attempt(s) refused while sign-in is paused after wrong passwords (%s); if this was not "
                 "you, someone may be guessing the password",
                 self._refused,
-                "new browsers" if bucket == UNTRUSTED else "one known browser",
+                "new browsers" if bucket.endswith(UNTRUSTED) else "one known browser",
             )
             self._refused = 0
             self._refused_logged = now
@@ -488,20 +511,49 @@ class Authenticator:
     def password_is_set(self) -> bool:
         return load_hash(self.dir) is not None
 
+    def password_allowed(self) -> bool:
+        return PasskeyStore(self.dir, self.clock).password_sign_in()
+
+    def _bucket(self, device_key: str | None, kind: str = "") -> tuple[str, float]:
+        prefix = f"{kind}:" if kind else ""
+        if device_key:
+            return f"{prefix}device:{device_key[:32]}", DEVICE_CAP
+        return (f"{prefix}{UNTRUSTED}" if kind else UNTRUSTED), UNTRUSTED_CAP
+
+    def _finish(self, device_key: str | None, old_session: str | None, how: str) -> SignIn:
+        """A new session (and a device token for a browser that has none), after any successful sign-in."""
+        log.info("signed in with %s from %s", how, "a browser that has signed in before" if device_key else "a new browser")
+        if old_session:
+            self.sessions.delete(old_session)
+        if device_key:
+            self.devices.touch(device_key)
+            new_device = None
+        else:
+            new_device = self.devices.issue()
+            device_key = digest(new_device)
+        secret, session = self.sessions.create(device=device_key[:16])
+        return SignIn(secret, session, new_device)
+
     def sign_in(self, password: Any, *, device_secret: str | None = None, old_session: str | None = None) -> SignIn:
         if not isinstance(password, str) or not password:
-            raise UsageError("Type the password to sign in.", hint="Enter the app's password and try again.", code="password_missing")
+            raise UsageError("Type the password to sign in.", hint="Enter the project's password and try again.", code="password_missing")
         if len(password) > MAX_LENGTH * 4:
             raise UsageError("That password is far too long to be right.", hint="Check it and try again.", code="password_too_long")
         stored = load_hash(self.dir)
         if stored is None:
             raise NeedsHuman(
-                "No sign-in password has been set for this app yet, so nobody can sign in.",
+                "No sign-in password has been set for this project yet, so nobody can sign in.",
                 hint="Ask the owner to run easy-ui set-password on the server (they type the password themselves).",
             )
+        if not self.password_allowed():
+            raise NotAllowed(
+                "Signing in with the password is turned off for these dashboards, so the password was not checked.",
+                hint="Sign in with a passkey, or with one of your recovery codes. The owner can turn the password back "
+                "on with easy-ui sign-in password on, on the computer that runs the dashboards.",
+                code="password_off",
+            )
         device_key = self.devices.check(device_secret)
-        bucket = f"device:{device_key[:32]}" if device_key else UNTRUSTED
-        cap = DEVICE_CAP if device_key else UNTRUSTED_CAP
+        bucket, cap = self._bucket(device_key)
         left = min(self.throttle.wait_left(bucket), cap)
         if left > 0:  # cheap early answer; reserve() below decides under the lock
             self._note_refused(bucket)
@@ -547,19 +599,38 @@ class Authenticator:
             )
 
         self.throttle.succeed(bucket)
-        log.info("signed in from %s", "a browser that has signed in before" if device_key else "a new browser")
         if _hasher.check_needs_rehash(stored):
             with contextlib.suppress(OSError), locked(self.dir / LOCK_FILE):
                 if load_hash(self.dir) == stored:
                     data = read_json(password_file(self.dir), {})
                     write_private_json(password_file(self.dir), {**data, "hash": _hasher.hash(normalize(password))})
-        if old_session:
-            self.sessions.delete(old_session)
-        if device_key:
-            self.devices.touch(device_key)
-            new_device = None
-        else:
-            new_device = self.devices.issue()
-            device_key = digest(new_device)
-        secret, session = self.sessions.create(device=device_key[:16])
-        return SignIn(secret, session, new_device)
+        return self._finish(device_key, old_session, "the password")
+
+    def sign_in_passkey(self, *, device_secret: str | None = None, old_session: str | None = None) -> SignIn:
+        """After a verified passkey answer. Never throttled: guessing a passkey is not possible."""
+        return self._finish(self.devices.check(device_secret), old_session, "a passkey")
+
+    def sign_in_recovery(self, code: Any, *, device_secret: str | None = None, old_session: str | None = None) -> SignIn:
+        """One recovery code, once. Throttled like the password, in buckets of its own."""
+        if not isinstance(code, str) or not code.strip():
+            raise UsageError("Type one of your recovery codes.", hint="They look like ABCD-EFGH-JKMN-PQRS.", code="code_missing")
+        codes = RecoveryCodes(self.dir, self.clock)
+        device_key = self.devices.check(device_secret)
+        bucket, cap = self._bucket(device_key, "recovery")
+        left = min(self.throttle.wait_left(bucket), cap)
+        if left > 0:
+            self._note_refused(bucket)
+            raise TooManyAttempts(left, new_browser=not device_key, what="recovery codes")
+        failures = self.throttle.reserve(bucket, cap)
+        if not codes.use(code):
+            log.warning("failed sign-in with a recovery code (%d wrong code(s) in a row)", failures)
+            wait = delay_for(failures, cap)
+            later = f" Sign-in pauses for {math.ceil(wait)} second(s) before the next try, to stop guessing." if wait else ""
+            raise WrongPassword(
+                "That recovery code is not right, or it was used before, so you are not signed in." + later,
+                hint="Check the code (each one works once). Dashes, spaces and capitals do not matter.",
+                code="wrong_code",
+            )
+        self.throttle.succeed(bucket)
+        log.warning("signed in with a recovery code; %d code(s) left", codes.left())
+        return self._finish(device_key, old_session, "a recovery code")

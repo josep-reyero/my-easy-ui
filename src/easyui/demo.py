@@ -1,4 +1,4 @@
-"""``easy-ui demo DIR``: a small made-up app to try easy-ui with, and the same app for the tests.
+"""``easy-ui demo DIR``: a small made-up project to try easy-ui with, and the same app for the tests.
 
 Everything here is synthetic (seeded random numbers): 120 days of movement, about
 70 activities, a ``weekly`` view, and a ``private_notes`` table that is NOT in the
@@ -6,7 +6,7 @@ app's ``[ui] tables`` (so it can be shown that it never reaches dashboards).
 
 ``easy-ui demo DIR`` writes::
 
-    DIR/app/app.toml                    the app ([app] and [ui])
+    DIR/app/project.toml                the project ([project] and [ui])
     DIR/app/ui/dashboards/*.yaml        two dashboards (overview, activities)
     DIR/app/ui/fixtures/demo.sqlite     the made-up data, for easy-ui preview
     DIR/data/demo/demo.sqlite           the same data where easy-ui looks for app data
@@ -36,7 +36,7 @@ from easyui.errors import Refused
 DEMO_TABLES = ("days", "activities", "weekly")
 
 DEMO_APP_TOML = """\
-[app]
+[project]
 name = "{name}"
 title = "Demo app"
 version = "0.1.0"
@@ -49,9 +49,10 @@ accent = "#2F6FDF"
 dashboards = ["overview", "activities"]
 
 [jobs.build]
-run = "build"
+run = "demo build"
 manual = true
 """
+DEMO_PROJECT_TOML = DEMO_APP_TOML
 
 OVERVIEW_YAML = """\
 spec: easy-ui/v1
@@ -188,6 +189,7 @@ layout:
       x: week
       y: Distance
       format: distance
+      partial: last
 """
 
 
@@ -240,7 +242,7 @@ def write_demo(base: Path, *, name: str = "demo", dashboards: bool = True, fixtu
     data_home = base / "data"
     state_home = base / "state"
     (app_dir / "ui" / "dashboards").mkdir(parents=True, exist_ok=True)
-    (app_dir / "app.toml").write_text(DEMO_APP_TOML.format(name=name), encoding="utf-8")
+    (app_dir / "project.toml").write_text(DEMO_APP_TOML.format(name=name), encoding="utf-8")
     db = make_demo_db(data_home / name / "demo.sqlite")
     if dashboards:
         (app_dir / "ui" / "dashboards" / "overview.yaml").write_text(OVERVIEW_YAML, encoding="utf-8")
@@ -264,7 +266,7 @@ def _cmd_demo(args: argparse.Namespace) -> Any:
     made = write_demo(base, fixture=True)
     app, data, state = made["app_dir"], made["data_home"], made["state_home"]
     text = "\n".join([
-        f"Wrote a demo app with made-up data in {base}.",
+        f"Wrote a demo project with made-up data in {base}.",
         "Look at it straight away (no password, nothing published):",
         f"  cd {app} && easy-ui preview",
         "Or try the whole journey, with the demo's own data and state folders:",
@@ -281,8 +283,8 @@ def _cmd_demo(args: argparse.Namespace) -> Any:
 def register(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
         "demo",
-        help="Write a small demo app with made-up data, to try easy-ui.",
-        description="Write a demo app (app.toml, two dashboards and made-up data) into a new folder, and print how "
+        help="Write a small demo project with made-up data, to try easy-ui.",
+        description="Write a demo project (project.toml, two dashboards and made-up data) into a new folder, and print how "
         "to preview, publish and serve it.",
     )
     p.add_argument("dir", help="a new or empty folder to write the demo into")

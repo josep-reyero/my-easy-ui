@@ -129,7 +129,7 @@ def test_unknown_component_type():
 def test_unknown_component_setting():
     e = one_error(MINIMAL.replace("query: q", "querry: q"))
     assert e.where == "layout[0][0].querry" and e.did_you_mean == "query"
-    assert e.allowed == ["type", "title", "query", "x", "y", "format", "unit"]
+    assert e.allowed == ["type", "title", "query", "x", "y", "format", "unit", "step", "readout", "partial"]
 
 
 def test_missing_required_setting():
@@ -705,3 +705,59 @@ def test_markdown_refuses_unsafe_links(href):
 def test_markdown_deep_nesting_is_bounded():
     blocks, _ = spec.parse_markdown("*" * 5000 + "x" + "*" * 5000)
     json.dumps(blocks)
+
+
+# ---------------------------------------------------------------- v1 visual settings
+
+
+def test_chart_and_table_visual_settings_compile():
+    dash, errors, _ = spec.check(yaml_doc("""
+        spec: easy-ui/v1
+        title: T
+        queries:
+          q: {sql: "SELECT day, steps, 0 AS open FROM days"}
+        layout:
+          - - {type: bar, title: B, query: q, x: day, y: steps, partial: last, step: 5000, readout: pointer}
+            - {type: line, title: L, query: q, x: day, y: steps, partial: open, readout: none, step: 0.5}
+            - {type: table, title: T, query: q, phone: scroll}
+            - {type: table, title: U, query: q}
+        """), slug="t", file="t.yaml")
+    assert errors == []
+    row = spec.compile_dashboard(dash)["layout"][0]
+    assert (row[0]["partial"], row[0]["step"], row[0]["readout"]) == ("last", 5000, "pointer")
+    assert (row[1]["partial"], row[1]["readout"], row[1]["step"]) == ("open", "none", 0.5)
+    assert row[2]["phone"] == "scroll" and row[3]["phone"] == "cards"
+    assert spec.compile_dashboard(dash)["layout"][0][0]["type"] == "bar"
+
+
+@pytest.mark.parametrize("setting, where", [
+    ("readout: always", "readout"),
+    ("step: 0", "step"),
+    ("step: -5", "step"),
+    ("step: '5'", "step"),
+    ("step: true", "step"),
+    ("step: .nan", "step"),
+    ("step: .inf", "step"),
+    ("partial: 5", "partial"),
+])
+def test_bad_chart_visual_settings(setting, where):
+    e = one_error(MINIMAL + f"      {setting}\n")
+    assert e.where == f"layout[0][0].{where}"
+
+
+def test_bad_table_phone_setting():
+    e = one_error(MINIMAL.replace("type: line", "type: table").replace("      x: day\n      y: steps\n", "      phone: tiny\n"))
+    assert e.where == "layout[0][0].phone" and e.allowed == ["cards", "scroll"]
+
+
+def test_partial_column_is_checked_against_the_data(built_app, bundle_path):
+    p = write(built_app, "partial", """
+        spec: easy-ui/v1
+        title: T
+        queries:
+          q: {sql: "SELECT day, steps FROM days"}
+        layout:
+          - - {type: bar, title: S, query: q, x: day, y: steps, partial: in_progress}
+        """)
+    entry = spec.validate_file(p, bundle=bundle_path)
+    assert [e["where"] for e in entry["errors"]] == ["layout[0][0].partial"]

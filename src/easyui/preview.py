@@ -3,8 +3,8 @@
 What it does:
 
 1. Builds a throwaway data bundle in a temporary folder (never touching the
-   app's real UI state): from the app's real data file when it exists, else
-   from a synthetic fixture the app may ship in ``ui/fixtures/`` (a SQLite file
+   app's real UI state): from the project's real data file when it exists, else
+   from a synthetic fixture the project may ship in ``ui/fixtures/`` (a SQLite file
    ending in ``.sqlite``, ``.sqlite3`` or ``.db``; ``--fixture`` forces the
    fixture). When there are several, the one named like ``[ui] data`` wins,
    else the first by name. Only the ``[ui] tables`` are copied,
@@ -133,8 +133,8 @@ def choose_data(cfg: AppConfig, *, fixture: bool = False) -> tuple[Path, str]:
         (f"No sample data was found in ui/fixtures/ ({looked})" if fixture else
          f"The app has no data yet{where}, and no sample data was found in ui/fixtures/ ({looked})")
         + ", so the preview would have nothing to show.",
-        hint="Add a small made-up copy of the app's data there, for example ui/fixtures/sample.sqlite with the same "
-        "tables, then run easy-ui preview again. Or run the app's job that creates its real data first.",
+        hint="Add a small made-up copy of the project's data there, for example ui/fixtures/sample.sqlite with the same "
+        "tables, then run easy-ui preview again. Or run the project's job that creates its real data first.",
     )
 
 
@@ -195,7 +195,7 @@ def problem_page(slug: str, title: str | None, file: str | None, errors: list[di
 
 
 class WorkingSource:
-    """Dashboards read live from the app's ``ui/dashboards/`` (validated against the preview data)."""
+    """Dashboards read live from the project's ``ui/dashboards/`` (validated against the preview data)."""
 
     preview = True
 
@@ -443,7 +443,7 @@ def serve(preview: Preview, *, port: int = 0, on_ready: Callable[[str], None] | 
     """Serve on 127.0.0.1 until stopped (Ctrl-C). ``server_holder`` receives the uvicorn server (for tests).
 
     While it runs, ``EASYUI_STATE_HOME`` points at the throwaway folder, so anything the server keeps (sessions)
-    stays there even when it looks the folder up by app name, never in the app's real UI state.
+    stays there even when it looks the folder up by app name, never in the project's real UI state.
     ``on_link_used(url)`` is called with the next one-time link each time a link has been used.
     """
     import uvicorn
@@ -531,7 +531,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help="Preview the dashboards on this computer before publishing.",
         description="Serve ui/dashboards/ straight from the working folder on 127.0.0.1 with throwaway data, a "
         "one-time link instead of a password, and automatic reload when a file changes. Sample data is read from "
-        "ui/fixtures/*.sqlite, *.sqlite3 or *.db when the app has no data yet (or with --fixture).",
+        "ui/fixtures/*.sqlite, *.sqlite3 or *.db when the project has no data yet (or with --fixture).",
     )
     p.add_argument("--port", type=int, default=0, help="port on 127.0.0.1 (default: a free one)")
     p.add_argument("--fixture", action="store_true", help="use the sample data in ui/fixtures/ even if real data exists")

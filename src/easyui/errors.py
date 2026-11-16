@@ -38,7 +38,7 @@ Subclasses (exit code, HTTP status, default code):
 - ``NeedsHuman``        6, 409, ``"needs_human"``: only the person can do the next step.
 - ``TemporaryFailure`` 75, 503, ``"temporary"``: try again later.
 - ``QueryTimeout``     75, 504, ``"query_timeout"``: a query ran past its time limit.
-- ``ConfigError``       1, 500, ``"config_invalid"``: ``app.toml`` is wrong.
+- ``ConfigError``       1, 500, ``"config_invalid"``: ``project.toml`` is wrong.
 - ``SpecError``         1, 422, ``"spec_invalid"``: a dashboard file is wrong (see ``problems``).
 - ``QueryError``        1, 400, ``"query_failed"``: a query could not run (bad SQL, missing column).
 - ``DataBuildError``    1, 500, ``"data_build_failed"``: the data copy could not be built.

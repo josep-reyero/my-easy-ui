@@ -145,7 +145,7 @@ def test_app_dir_needs_a_value():
 
 def test_app_dir_without_app_toml(tmp_path):
     code, data = run_cli_json("--app-dir", str(tmp_path), "validate")
-    assert code == 3 and "app.toml" in data["error"]["message"]
+    assert code == 3 and "project.toml" in data["error"]["message"]
 
 
 def test_unknown_command_is_usage_error_as_json():
@@ -171,7 +171,7 @@ def test_version():
 
 
 def test_broken_app_toml_is_reported(demo_app):
-    (demo_app.app_dir / "app.toml").write_text("[app\n")
+    (demo_app.app_dir / "project.toml").write_text("[app\n")
     code, data = run_cli_json("validate")
     assert code == 1 and data["error"]["code"] == "config_invalid"
 

@@ -1,0 +1,31 @@
+{
+ "about": "Recorded from Chromium's virtual authenticator (CDP WebAuthn domain, ctap2, internal, user verification) through the easy-ui sign-in settings page and sign-in page on http://localhost:8765. Synthetic: a throwaway key, made-up demo project.",
+ "origin": "http://localhost:8765",
+ "rp_id": "localhost",
+ "user_id": "mLpif_yQL5C7CAQ5WYV2Cg",
+ "register_challenge": "remDJM6xQIEZlaQONCX3IwAAAABq-zK0zRKpsuiN2JAWYXbuK4qCBQ",
+ "registration": {
+  "id": "PfXu1j5tf9p5x0To4niw9q1zjtEhSKU9Vl-ZTEK7Ors",
+  "rawId": "PfXu1j5tf9p5x0To4niw9q1zjtEhSKU9Vl-ZTEK7Ors",
+  "type": "public-key",
+  "response": {
+   "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoicmVtREpNNnhRSUVabGFRT05DWDNJd0FBQUFCcS16SzB6Uktwc3VpTjJKQVdZWGJ1SzRxQ0JRIiwib3JpZ2luIjoiaHR0cDovL2xvY2FsaG9zdDo4NzY1IiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+   "attestationObject": "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YViBSZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2NFAAAAAQECAwQFBgcIAQIDBAUGBwgAID317tY-bX_aecdE6OJ4sPatc47RIUilPVZfmUxCuzq7pAEBAycgBiFYIF1JfloLsOJKtUtmk5cORTfVXFGlTTVjndHQQJBmuzIf",
+   "transports": [
+    "internal"
+   ]
+  }
+ },
+ "login_challenge": "puLZ42CcCqvroB9dC2W_ngAAAABq-zK0h5IldMIpIsv165rAI9H3Bg",
+ "assertion": {
+  "id": "PfXu1j5tf9p5x0To4niw9q1zjtEhSKU9Vl-ZTEK7Ors",
+  "rawId": "PfXu1j5tf9p5x0To4niw9q1zjtEhSKU9Vl-ZTEK7Ors",
+  "type": "public-key",
+  "response": {
+   "clientDataJSON": "eyJ0eXBlIjoid2ViYXV0aG4uZ2V0IiwiY2hhbGxlbmdlIjoicHVMWjQyQ2NDcXZyb0I5ZEMyV19uZ0FBQUFCcS16SzBoNUlsZE1JcElzdjE2NXJBSTlIM0JnIiwib3JpZ2luIjoiaHR0cDovL2xvY2FsaG9zdDo4NzY1IiwiY3Jvc3NPcmlnaW4iOmZhbHNlfQ",
+   "authenticatorData": "SZYN5YgOjGh0NBcPZHZgW4_krrmihjLHmVzzuoMdl2MFAAAAAg",
+   "signature": "5G8WaRFJRiESEb32vcUZXyDsasidd5MqpXtwaxC9JufRz4sQkUqarmTnxaf_VqniJplz4qAXNydgypS2w28aDA",
+   "userHandle": "mLpif_yQL5C7CAQ5WYV2Cg"
+  }
+ }
+}

@@ -40,7 +40,7 @@ Constants: ``SPEC_VERSION`` (``"easy-ui/v1"``), ``SLUG_RE``, ``NAME_RE``,
 ``validate_file(path, *, bundle=None, file_label=None) -> dict``
     ``{"file", "slug", "title", "ok", "errors": [...], "warnings": [...]}``.
 ``validate_app(config, files=None, *, check_data=True) -> dict``
-    Validates the app's dashboards (or ``files``) and, when there is current
+    Validates the project's dashboards (or ``files``) and, when there is current
     data, checks them against it. ``{"ok", "app", "data": {"checked", "bundle",
     "note"}, "dashboards": [...], "errors", "warnings"}``.
 ``resolve_params(dashboard, given=None, *, today=None) -> dict``
@@ -140,6 +140,22 @@ _QUERY = Setting("query", "Name of a query under queries: in this file.", requir
 _FORMAT = Setting("format", "How values look; one of the formats. Not set: numbers as 'number', text unchanged.")
 _UNIT = Setting("unit", "Short unit shown next to values on the axis, e.g. 'km' or 'bpm' (up to 12 characters).")
 _X = Setting("column", "Column for the horizontal axis (usually a date or a category).", required=True)
+_READOUT = Setting(
+    "readout",
+    "The value shown in the chart's heading: latest (the newest point, or the one under the pointer), pointer "
+    "(only while pointing at the chart) or none.",
+    default="latest",
+)
+_PARTIAL = Setting(
+    "partial",
+    "Marks a period that is still in progress (this week so far): last (the last row) or the name of a column "
+    "that is true (1) for those rows. They are drawn lighter (bars) or dashed (lines) and read 'so far'.",
+)
+_STEP = Setting(
+    "step",
+    "The gap between the lines across the chart, in the query's own numbers (for distance in metres, 5000 is a "
+    "line every 5 km). Not set: round steps chosen from the values.",
+)
 _Y = Setting(
     "columns",
     "Column, or list of up to 8 columns, drawn as series. Name them nicely in the SQL with AS.",
@@ -166,11 +182,13 @@ COMPONENTS: dict[str, dict[str, Any]] = {
     },
     "line": {
         "description": "A line chart of one or more columns over x.",
-        "settings": {"title": _TITLE, "query": _QUERY, "x": _X, "y": _Y, "format": _FORMAT, "unit": _UNIT},
+        "settings": {"title": _TITLE, "query": _QUERY, "x": _X, "y": _Y, "format": _FORMAT, "unit": _UNIT,
+                     "step": _STEP, "readout": _READOUT, "partial": _PARTIAL},
     },
     "area": {
         "description": "Like line, with the area under each line filled.",
-        "settings": {"title": _TITLE, "query": _QUERY, "x": _X, "y": _Y, "format": _FORMAT, "unit": _UNIT},
+        "settings": {"title": _TITLE, "query": _QUERY, "x": _X, "y": _Y, "format": _FORMAT, "unit": _UNIT,
+                     "step": _STEP, "readout": _READOUT, "partial": _PARTIAL},
     },
     "bar": {
         "description": "A bar chart of one or more columns per x value.",
@@ -182,6 +200,9 @@ COMPONENTS: dict[str, dict[str, Any]] = {
             "format": _FORMAT,
             "unit": _UNIT,
             "stacked": Setting("bool", "true stacks the series on top of each other.", default=False),
+            "step": _STEP,
+            "readout": _READOUT,
+            "partial": _PARTIAL,
         },
     },
     "table": {
@@ -194,6 +215,12 @@ COMPONENTS: dict[str, dict[str, Any]] = {
                 "Which columns to show, in order: a column name, or {column, label, format}. Not set: all columns.",
             ),
             "limit": Setting("int", "Show at most this many rows.", min=1, max=LIMITS["table_limit"]),
+            "phone": Setting(
+                "phone",
+                "On narrow screens: cards (each row as a small card of label and value, no sideways scrolling) or "
+                "scroll (the table as it is, scrolled sideways).",
+                default="cards",
+            ),
         },
     },
     "text": {
@@ -228,6 +255,10 @@ _KIND_TEXT = {
     "markdown": "text in the markdown subset",
     "params": "a list of param names from params:",
     "better": "higher or lower",
+    "readout": "latest, pointer or none",
+    "partial": "last, or a column name returned by the query",
+    "step": "a number above 0",
+    "phone": "cards or scroll",
 }
 
 EXAMPLE = """\
@@ -293,7 +324,7 @@ def catalog() -> dict[str, Any]:
             "rules": [
                 "exactly one statement starting with SELECT or WITH",
                 "parameters only as :name, and every :name must be declared under params",
-                "only the tables listed in app.toml [ui] tables can be read (see: easy-ui tables)",
+                "only the tables listed in project.toml [ui] tables can be read (see: easy-ui tables)",
                 "no ATTACH, PRAGMA, writes or extension functions",
                 "text values in single quotes; double quotes are for names",
                 f"time limit {sandbox.DEFAULT_LIMITS.timeout_s:g} s, at most {sandbox.DEFAULT_LIMITS.max_rows} rows",
@@ -1072,6 +1103,23 @@ def _check_setting(ctx: _Ctx, path, kind: str, s: Setting, v: Any, ctype: str, d
                     hint="Write better: higher when a rise is good news (HRV, steps), better: lower when a fall is (resting heart rate).")
             return _BAD
         return v
+    if kind in ("readout", "phone"):
+        allowed = ["latest", "pointer", "none"] if kind == "readout" else ["cards", "scroll"]
+        if v not in allowed:
+            ctx.err(path, f"{what} is {v!r}, but it can only be one of: {', '.join(allowed)}.", allowed=allowed, got=str(v))
+            return _BAD
+        return v
+    if kind == "partial":
+        if not isinstance(v, str) or not v:
+            ctx.err(path, f"{what} must be last or a column name.",
+                    hint="partial: last marks the last row as still in progress; or name a column that is 1 for such rows.")
+            return _BAD
+        return v
+    if kind == "step":
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not (v > 0) or v != v or v == float("inf"):
+            ctx.err(path, f"{what} must be a number above 0.", hint="For example step: 5000 for a line every 5 km of metres.")
+            return _BAD
+        return v
     if kind == "bool":
         if not isinstance(v, bool):
             ctx.err(path, f"{what} must be true or false.")
@@ -1191,7 +1239,7 @@ def _check_component(ctx: _Ctx, path, raw: Any, dash: dict, refs: list, r: int, 
     if q:
         for key, s in settings.items():
             val = out.get(key)
-            if s.kind == "column" and val:
+            if (s.kind == "column" or (s.kind == "partial" and val != "last")) and val:
                 refs.append((path + (key,), q, val))
             elif s.kind == "columns" and val:
                 for i, col in enumerate(val):
@@ -1561,8 +1609,8 @@ def validate_app(config: Any, files: list[str | Path] | None = None, *, check_da
         missing = [d for d in getattr(config, "dashboards", ()) if d not in slugs]
         if missing and targets:
             notes.append(
-                f"app.toml lists {', '.join(missing)} under [ui] dashboards, but there is no such file in ui/dashboards/, "
-                "so it is left out of the menu. Fix the name in app.toml or add the file."
+                f"project.toml lists {', '.join(missing)} under [ui] dashboards, but there is no such file in ui/dashboards/, "
+                "so it is left out of the menu. Fix the name in project.toml or add the file."
             )
     current = _bundle.current_bundle(config) if check_data else None
     data = {"checked": current is not None, "bundle": current.stem if current else None, "note": None}

@@ -26,13 +26,31 @@ Commands registered here (see ``easyui.cli`` for the contract):
   ``{"ok", "items": [{"id", "title", "status", "why", "fix"}]}`` with status
   ``ok`` | ``fail`` | ``warn``; ``ok`` is false when any item fails (exit 1).
 
-HTTP API (JSON; every route except the three sign-in routes needs a session)
------------------------------------------------------------------------------
-``GET /api/session``          ``{signed_in, app: {name, title, accent}}`` (plus ``preview: true`` in a preview)
-``POST /api/login``           ``{password}`` -> ``{signed_in: true, app}`` and the session cookie.
+HTTP API (JSON; every route except session, login, logout, recovery, passkeys/options with purpose
+"login" and passkeys/login needs a session)
+-----------------------------------------------------------------------------------------------------
+``GET /api/session``          ``{signed_in, app: {name, title, accent}, sign_in: {password, passkeys,
+                              passkeys_here, recovery}}`` (``sign_in`` is left out in a preview, which
+                              has ``preview: true``).
+``POST /api/login``           ``{password}`` -> ``{signed_in: true, app}`` and the session cookie. 403
+                              ``password_off`` when password sign-in is switched off; 429 when throttled.
+``POST /api/recovery``        ``{code}`` -> signed in; the code is used up. Throttled in its own buckets.
+``POST /api/passkeys/options`` ``{purpose: "login" | "register"}`` -> WebAuthn options (base64url).
+                              Login also sets the short-lived passkey cookie its challenge is bound to;
+                              register needs a recent sign-in (``sign_in_again`` otherwise).
+``POST /api/passkeys/login``  ``{credential}`` -> signed in. Never throttled. Refused: ``unknown_passkey``,
+                              ``other_address``, ``passkey_stale``, ``passkey_replayed``, ``passkey_refused``.
+``POST /api/passkeys/register`` ``{credential, name}`` -> the new passkey (recent sign-in).
+``POST /api/passkeys/remove`` ``{id}`` (recent sign-in); removing the last one turns the password back on.
+``GET /api/signin``           the sign-in settings: passkeys (id, name, created, last used), password
+                              on/off, recovery codes left.
+``POST /api/signin/password`` ``{on}`` (recent sign-in; off only while a passkey exists).
+``POST /api/recovery-codes``  ``{}`` -> ten new one-time codes, shown once (recent sign-in).
+Passkeys work on ``http://localhost`` and over HTTPS; the RP ID is the host the browser used (an IP
+address cannot be one), and the origin must match the request's own host.
 ``POST /api/logout``          ``{signed_in: false}``; the session is removed.
 ``GET /api/dashboards``       ``[{slug, title, description}]`` (published dashboards only), in the order of
-                              ``[ui] dashboards`` in app.toml, then the others by name.
+                              ``[ui] dashboards`` in project.toml, then the others by name.
 ``GET /api/dashboards/{slug}`` the compiled dashboard (no SQL).
 ``POST /api/query``           ``{dashboard, queries: [names], params}`` ->
                               ``{results: {name: {columns, rows, truncated}}}``. A query that fails
@@ -54,7 +72,8 @@ the page can use real addresses.
 Cookies: the session cookie is ``easyui-<app>`` on plain local http and
 ``__Host-easyui-<app>`` over HTTPS (then also ``Secure``); always ``HttpOnly``,
 ``SameSite=Strict`` and ``Path=/``. The device token (see ``easyui.auth``)
-uses the same rules with ``-device`` appended.
+uses the same rules with ``-device`` appended, and the passkey challenge cookie with ``-passkey``
+(5 minutes).
 
 Dashboards come from a *source* with the methods ``list()``, ``compiled(slug,
 today=...)``, ``dashboard(slug)``, ``bundle_path()`` and ``rev()``. By default
@@ -117,14 +136,21 @@ from starlette.applications import Starlette
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
-from starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
+from starlette.responses import (
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+)
 from starlette.routing import Mount, Route
 
 from easyui import auth as authmod
-from easyui import bundle, paths, sandbox, security, spec
+from easyui import bundle, passkeys, paths, sandbox, security, spec, webauthn
 from easyui.appconfig import AppConfig
 from easyui.errors import (
     EasyUIError,
+    NeedsHuman,
+    NotAllowed,
     NotFound,
     ParamError,
     Refused,
@@ -252,6 +278,8 @@ class ServerState:
     preview: bool = False
     on_preview_link_used: Callable[[str], None] | None = None
     query_slots: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(4))
+    challenges: passkeys.Challenges = field(default_factory=passkeys.Challenges)
+    clock: Callable[[], float] = time.time
     _etags: dict[tuple[str, int, int], str] = field(default_factory=dict)
 
 
@@ -260,10 +288,15 @@ class ServerState:
 
 def cookie_names(app: str, https: bool, preview: bool = False) -> tuple[str, str]:
     # Cookies do not keep ports apart, so a preview on 127.0.0.1 uses its own name and never
-    # replaces the session of a real server for the same app on the same computer.
+    # replaces the session of a real server for the same project on the same computer.
     base = f"easyui-{app}" + ("-preview" if preview else "")
     prefix = "__Host-" if https else ""
     return prefix + base, prefix + base + "-device"
+
+
+def passkey_cookie(app: str, https: bool) -> str:
+    """The short-lived cookie that ties a passkey sign-in request to the browser that asked for it."""
+    return ("__Host-" if https else "") + f"easyui-{app}-passkey"
 
 
 def _state(request: Request) -> ServerState:
@@ -290,7 +323,7 @@ def require_session(request: Request) -> Session:
     if s is None:
         raise SignInRequired(
             "You are not signed in, so the dashboards stay hidden.",
-            hint="Sign in with this app's password.",
+            hint="Sign in with this project's password.",
         )
     if request.url.path != "/api/rev":
         _state(request).activity.touch()
@@ -344,7 +377,7 @@ async def _on_http_error(request: Request, exc: Exception) -> Response:
         )
     elif request.url.path.startswith("/api/") and exc.status_code == 404 and current_session(request) is None:
         # Unknown API addresses answer like every other API route: sign in first.
-        resp = _error_response(SignInRequired("You are not signed in, so the dashboards stay hidden.", hint="Sign in with this app's password."))
+        resp = _error_response(SignInRequired("You are not signed in, so the dashboards stay hidden.", hint="Sign in with this project's password."))
     elif request.url.path.startswith("/api/"):
         resp = JSONResponse(
             security.error_dict("not_found", "There is nothing at this address.", "Check the address, or open the dashboards page."),
@@ -380,6 +413,8 @@ async def api_session(request: Request) -> Response:
     body: dict[str, Any] = {"signed_in": s is not None, "app": st.config.public()}
     if st.preview:
         body["preview"] = True
+    else:
+        body["sign_in"] = await run_in_threadpool(_sign_in_ways, st, request)
     resp = JSONResponse(body)
     if s is None and name in request.cookies:
         _clear_cookie(resp, name, info.https)
@@ -397,12 +432,7 @@ async def api_login(request: Request) -> Response:
         device_secret=request.cookies.get(device_cookie),
         old_session=request.cookies.get(session_cookie),
     )
-    st.activity.touch()
-    resp = JSONResponse({"signed_in": True, "app": st.config.public()})
-    _set_cookie(resp, session_cookie, result.session_secret, st.sessions.max_age(), info.https)
-    if result.device_secret:
-        _set_cookie(resp, device_cookie, result.device_secret, authmod.DEVICE_LIFETIME, info.https)
-    return resp
+    return _signed_in_response(st, request, result)
 
 
 async def api_logout(request: Request) -> Response:
@@ -416,6 +446,321 @@ async def api_logout(request: Request) -> Response:
     resp = JSONResponse({"signed_in": False})
     _clear_cookie(resp, name, info.https)
     return resp
+
+
+# ---------------------------------------------------------------- passkeys, recovery codes, password switch
+
+
+def _sign_in_ways(st: ServerState, request: Request) -> dict[str, Any]:
+    """What the sign-in page offers (no secrets): which ways in exist and work on this address."""
+    store = passkeys.PasskeyStore(st.config.state.auth, st.clock)
+    has_password = authmod.load_hash(st.config.state.auth) is not None
+    n = store.count()
+    return {
+        "password": has_password and store.password_sign_in(),
+        "passkeys": n > 0,
+        "passkeys_here": passkeys_usable_here(request),
+        "recovery": n > 0 and passkeys.RecoveryCodes(st.config.state.auth).left() > 0,
+    }
+
+
+def _hostname(host_with_port: str) -> str:
+    return security.normalize_host(host_with_port) or ""
+
+
+def _is_ip(hostname: str) -> bool:
+    try:
+        ipaddress.ip_address(hostname.strip("[]"))
+    except ValueError:
+        return False
+    return True
+
+
+def passkeys_usable_here(request: Request) -> bool:
+    """A guess for the page (a GET has no Origin): https, or http://localhost."""
+    info = security.request_info(request)
+    name = _hostname(info.host)
+    return not _is_ip(name) and (info.https or name == "localhost" or request.headers.get("x-forwarded-proto", "") == "https")
+
+
+def passkey_site(request: Request) -> tuple[str, frozenset[str]]:
+    """The RP ID and the one origin a passkey answer must come from, for this request.
+
+    The origin is the page's own: the request's Origin header (the middleware already made sure it is this
+    server's own address, or its https form behind a proxy that does not say so). Passkeys need https, except
+    on http://localhost for trying things out; an IP address cannot be an RP ID at all.
+    """
+    info = security.request_info(request)
+    origin = (request.headers.get("origin") or info.origin).strip().lower()
+    allowed = {info.origin} | ({"https://" + info.host} if not info.https else set())
+    if origin not in allowed:
+        raise NotAllowed(
+            "This request did not come from the dashboards page itself, so passkeys were not used.",
+            hint="Open the dashboards page directly and try again.",
+            code="cross_site",
+        )
+    scheme, _, host = origin.partition("://")
+    name = _hostname(host)
+    if not name or _is_ip(name):
+        raise NotAllowed(
+            "Passkeys do not work when the dashboards are opened with a number address such as 127.0.0.1.",
+            hint="Open them with a name instead, for example http://localhost:PORT on this computer, or the https "
+            "address of your private network.",
+            code="passkeys_unavailable",
+        )
+    if scheme != "https" and name != "localhost":
+        raise NotAllowed(
+            "Passkeys only work over a secure (https) connection, and this page was opened without one.",
+            hint="Open the dashboards with their https address (for example the one your private network gives), "
+            "or with http://localhost on this computer.",
+            code="passkeys_unavailable",
+        )
+    return name, frozenset({origin})
+
+
+def _no_passkeys_in_preview(st: ServerState) -> None:
+    if st.preview:
+        raise NotAllowed(
+            "A preview has no sign-in of its own, so passkeys are not used in it.",
+            hint="Try passkeys with easy-ui serve on this computer, opened at http://localhost:PORT.",
+            code="preview",
+        )
+
+
+def _require_recent(st: ServerState, session: Session) -> None:
+    if st.clock() - session.created > passkeys.RECENT_SIGN_IN:
+        raise NotAllowed(
+            "For your safety, how you sign in can only be changed shortly after signing in, and this page signed in "
+            "a while ago.",
+            hint="Sign out, sign in again, and then make the change within 10 minutes.",
+            code="sign_in_again",
+        )
+
+
+def _settings(st: ServerState, request: Request, session: Session) -> dict[str, Any]:
+    auth_dir = st.config.state.auth
+    store = passkeys.PasskeyStore(auth_dir, st.clock)
+    left = passkeys.RECENT_SIGN_IN - (st.clock() - session.created)
+    return {
+        "password_set": authmod.load_hash(auth_dir) is not None,
+        "password_sign_in": store.password_sign_in(),
+        "passkeys": [{k: v for k, v in p.items() if k != "rp_id"} | {"here": p["rp_id"] == _hostname(security.request_info(request).host)}
+                     for p in store.listing()],
+        "max_passkeys": passkeys.MAX_PASSKEYS,
+        "recovery": passkeys.RecoveryCodes(auth_dir).status(),
+        "passkeys_here": passkeys_usable_here(request),
+        "can_change_for": max(0, int(left)),
+    }
+
+
+def _signed_in_response(st: ServerState, request: Request, result: authmod.SignIn) -> Response:
+    info = security.request_info(request)
+    session_cookie, device_cookie = cookie_names(st.config.name, info.https, st.preview)
+    st.activity.touch()
+    resp = JSONResponse({"signed_in": True, "app": st.config.public()})
+    _set_cookie(resp, session_cookie, result.session_secret, st.sessions.max_age(), info.https)
+    if result.device_secret:
+        _set_cookie(resp, device_cookie, result.device_secret, authmod.DEVICE_LIFETIME, info.https)
+    return resp
+
+
+async def api_signin_settings(request: Request) -> Response:
+    session = require_session(request)
+    st = _state(request)
+    _no_passkeys_in_preview(st)
+    return JSONResponse(await run_in_threadpool(_settings, st, request, session))
+
+
+async def api_passkey_options(request: Request) -> Response:
+    st = _state(request)
+    _no_passkeys_in_preview(st)
+    body = await json_body(request, ("purpose",))
+    purpose = body.get("purpose")
+    rp_id, _origins = passkey_site(request)
+    info = security.request_info(request)
+    store = passkeys.PasskeyStore(st.config.state.auth, st.clock)
+    if purpose == "login":
+        token = secrets.token_urlsafe(24)
+        challenge = st.challenges.issue("login", hashlib.sha256(token.encode()).hexdigest())
+        resp = JSONResponse({"publicKey": {
+            "challenge": webauthn.b64url_encode(challenge),
+            "rpId": rp_id,
+            "timeout": 120_000,
+            "userVerification": "required",
+            "allowCredentials": [],
+        }})
+        _set_cookie(resp, passkey_cookie(st.config.name, info.https), token, passkeys.CHALLENGE_SECONDS, info.https)
+        return resp
+    if purpose == "register":
+        session = require_session(request)
+        _require_recent(st, session)
+        user_id = await run_in_threadpool(store.user_id)
+        challenge = st.challenges.issue("register", session.key)
+        existing = [cid for cid, c in (await run_in_threadpool(store.credentials)).items()]
+        return JSONResponse({"publicKey": {
+            "challenge": webauthn.b64url_encode(challenge),
+            "rp": {"id": rp_id, "name": st.config.title},
+            "user": {"id": webauthn.b64url_encode(user_id), "name": st.config.name, "displayName": f"{st.config.title} dashboards"},
+            "pubKeyCredParams": [{"type": "public-key", "alg": a} for a in webauthn.ALGORITHMS],
+            "timeout": 120_000,
+            "attestation": "none",
+            "authenticatorSelection": {"residentKey": "required", "requireResidentKey": True, "userVerification": "required"},
+            "excludeCredentials": [{"type": "public-key", "id": cid} for cid in existing],
+        }})
+    raise UsageError("Say what the passkey is for: login or register.", hint="Reload the page and try again.")
+
+
+def _challenge_of(credential: Any) -> bytes:
+    """The challenge the browser's answer says it answers (checked for real by webauthn later)."""
+    try:
+        resp = credential["response"]
+        raw = webauthn.b64url_decode(resp["clientDataJSON"], what="the browser's part", limit=webauthn.MAX_CLIENT_DATA)
+        cd = json.loads(raw.decode("utf-8"))
+        return webauthn.b64url_decode(cd["challenge"], what="the challenge", limit=256)
+    except (KeyError, TypeError, ValueError, UnicodeDecodeError, RecursionError):
+        raise webauthn.WebAuthnError(
+            "The passkey answer could not be read, so you are not signed in with it.", hint="Try again."
+        ) from None
+
+
+def _passkey_login(st: ServerState, request: Request, credential: Any) -> authmod.SignIn:
+    rp_id, origins = passkey_site(request)
+    info = security.request_info(request)
+    token = request.cookies.get(passkey_cookie(st.config.name, info.https)) or ""
+    challenge = _challenge_of(credential)
+    st.challenges.check(challenge, "login", hashlib.sha256(token.encode()).hexdigest())
+    store = passkeys.PasskeyStore(st.config.state.auth, st.clock)
+    cid = webauthn.b64url_encode(webauthn.credential_id_of(credential))
+    saved = store.get(cid)
+    if saved is None:
+        log.warning("refused a passkey that is not saved for these dashboards")
+        raise NotAllowed(
+            "This passkey is not one of the passkeys saved for these dashboards, so you are not signed in.",
+            hint="Choose another passkey, or sign in another way and add this one on the Sign-in settings page.",
+            code="unknown_passkey",
+        )
+    if saved.get("rp_id") != rp_id:
+        raise NotAllowed(
+            f"This passkey was added for the address {saved.get('rp_id')}, not for this one, so it cannot be used here.",
+            hint=f"Open the dashboards at {saved.get('rp_id')}, or add a passkey for this address.",
+            code="other_address",
+        )
+    try:
+        public_key = webauthn.b64url_decode(saved["public_key"], what="the saved key", limit=4096)
+        alg = int(saved["alg"])
+        stored_count = int(saved.get("sign_count") or 0)
+    except (KeyError, TypeError, ValueError):
+        raise NotAllowed("The saved passkey could not be read.", hint="Remove it and add it again.", code="passkey_damaged") from None
+    result = webauthn.verify_assertion(
+        credential, challenge=challenge, origins=origins, rp_id=rp_id, public_key=public_key, alg=alg,
+        stored_sign_count=stored_count, user_id=store.user_id(),
+    )
+    st.challenges.accept(challenge)  # after it verified; refuses a second copy of the same answer
+    store.touch(cid, result.sign_count, result.backed_up)
+    session_cookie, device_cookie = cookie_names(st.config.name, info.https, st.preview)
+    return st.auth.sign_in_passkey(
+        device_secret=request.cookies.get(device_cookie), old_session=request.cookies.get(session_cookie)
+    )
+
+
+async def api_passkey_login(request: Request) -> Response:
+    st = _state(request)
+    _no_passkeys_in_preview(st)
+    body = await json_body(request, ("credential",))
+    result = await run_in_threadpool(_passkey_login, st, request, body.get("credential"))
+    resp = _signed_in_response(st, request, result)
+    info = security.request_info(request)
+    _clear_cookie(resp, passkey_cookie(st.config.name, info.https), info.https)
+    return resp
+
+
+def _passkey_register(st: ServerState, request: Request, session: Session, credential: Any, name: Any) -> dict[str, Any]:
+    _require_recent(st, session)
+    rp_id, origins = passkey_site(request)
+    challenge = _challenge_of(credential)
+    st.challenges.check(challenge, "register", session.key)
+    reg = webauthn.verify_registration(credential, challenge=challenge, origins=origins, rp_id=rp_id)
+    st.challenges.accept(challenge)
+    store = passkeys.PasskeyStore(st.config.state.auth, st.clock)
+    added = store.add(reg, rp_id=rp_id, name=name if isinstance(name, str) else None)
+    log.warning("a passkey was added (%s)", added["name"][:60])
+    return {"added": {k: v for k, v in added.items() if k != "rp_id"}, **_settings(st, request, session)}
+
+
+async def api_passkey_register(request: Request) -> Response:
+    session = require_session(request)
+    st = _state(request)
+    _no_passkeys_in_preview(st)
+    body = await json_body(request, ("credential", "name"))
+    return JSONResponse(await run_in_threadpool(_passkey_register, st, request, session, body.get("credential"), body.get("name")))
+
+
+def _passkey_remove(st: ServerState, request: Request, session: Session, cid: Any) -> dict[str, Any]:
+    _require_recent(st, session)
+    if not isinstance(cid, str) or not cid or len(cid) > 2000:
+        raise UsageError("Say which passkey to remove.", hint="Reload the page and try again.")
+    store = passkeys.PasskeyStore(st.config.state.auth, st.clock)
+    if cid not in store.credentials():
+        raise NotFound("That passkey is not saved (any more).", hint="Reload the page.", code="no_such_passkey")
+    removed = store.remove(cid, password_set=authmod.load_hash(st.config.state.auth) is not None)
+    log.warning("a passkey was removed (%s)", removed["name"][:60])
+    return {"removed": removed, **_settings(st, request, session)}
+
+
+async def api_passkey_remove(request: Request) -> Response:
+    session = require_session(request)
+    st = _state(request)
+    _no_passkeys_in_preview(st)
+    body = await json_body(request, ("id",))
+    return JSONResponse(await run_in_threadpool(_passkey_remove, st, request, session, body.get("id")))
+
+
+def _password_switch(st: ServerState, request: Request, session: Session, on: Any) -> dict[str, Any]:
+    _require_recent(st, session)
+    if not isinstance(on, bool):
+        raise UsageError("Say whether password sign-in should be on or off.", hint="Reload the page and try again.")
+    store = passkeys.PasskeyStore(st.config.state.auth, st.clock)
+    store.set_password_sign_in(on, password_set=authmod.load_hash(st.config.state.auth) is not None)
+    log.warning("password sign-in was turned %s", "on" if on else "off")
+    return _settings(st, request, session)
+
+
+async def api_password_switch(request: Request) -> Response:
+    session = require_session(request)
+    st = _state(request)
+    _no_passkeys_in_preview(st)
+    body = await json_body(request, ("on",))
+    return JSONResponse(await run_in_threadpool(_password_switch, st, request, session, body.get("on")))
+
+
+def _new_codes(st: ServerState, request: Request, session: Session) -> dict[str, Any]:
+    _require_recent(st, session)
+    codes = passkeys.RecoveryCodes(st.config.state.auth, st.clock).make()
+    log.warning("new recovery codes were made; the old ones no longer work")
+    return {"codes": codes, **_settings(st, request, session)}
+
+
+async def api_recovery_codes(request: Request) -> Response:
+    session = require_session(request)
+    st = _state(request)
+    _no_passkeys_in_preview(st)
+    await json_body(request, ())
+    return JSONResponse(await run_in_threadpool(_new_codes, st, request, session))
+
+
+async def api_recovery_login(request: Request) -> Response:
+    st = _state(request)
+    _no_passkeys_in_preview(st)
+    info = security.request_info(request)
+    body = await json_body(request, ("code",))
+    session_cookie, device_cookie = cookie_names(st.config.name, info.https, st.preview)
+    result = await run_in_threadpool(
+        st.auth.sign_in_recovery,
+        body.get("code"),
+        device_secret=request.cookies.get(device_cookie),
+        old_session=request.cookies.get(session_cookie),
+    )
+    return _signed_in_response(st, request, result)
 
 
 def _check_slug(slug: Any) -> str:
@@ -635,6 +980,8 @@ def create_app(
         preview=preview_token is not None,
         on_preview_link_used=on_preview_link_used,
         query_slots=asyncio.Semaphore(max(1, settings.query_slots)),
+        challenges=passkeys.Challenges(clock),
+        clock=clock,
     )
 
     @contextlib.asynccontextmanager
@@ -658,6 +1005,14 @@ def create_app(
         Route("/dashboards/{slug}", api_dashboard, methods=["GET"]),
         Route("/query", api_query, methods=["POST"]),
         Route("/rev", api_rev, methods=["GET"]),
+        Route("/signin", api_signin_settings, methods=["GET"]),
+        Route("/signin/password", api_password_switch, methods=["POST"]),
+        Route("/passkeys/options", api_passkey_options, methods=["POST"]),
+        Route("/passkeys/login", api_passkey_login, methods=["POST"]),
+        Route("/passkeys/register", api_passkey_register, methods=["POST"]),
+        Route("/passkeys/remove", api_passkey_remove, methods=["POST"]),
+        Route("/recovery-codes", api_recovery_codes, methods=["POST"]),
+        Route("/recovery", api_recovery_login, methods=["POST"]),
     ]
     routes = [
         Mount("/api", routes=api),
@@ -723,7 +1078,7 @@ def _systemd_socket(env: dict[str, str], *, first_fd: int = 3) -> socket.socket 
     if not fds.strip().isdigit() or int(fds) != 1:
         raise UsageError(
             f"systemd passed {fds} sockets, but easy-ui serves one app on exactly one socket.",
-            hint="Give the app's .socket unit a single ListenStream= line.",
+            hint="Give the project's .socket unit a single ListenStream= line.",
         )
     sock = socket.socket(fileno=first_fd)
     if sock.type != socket.SOCK_STREAM:
@@ -949,15 +1304,24 @@ def run_checks(config: AppConfig) -> dict[str, Any]:
             "The server runs as an ordinary account, not as the administrator (root)",
             "fail" if root else "ok",
             "A web server running as root could let one mistake in it take over the whole computer.",
-            "Run easy-ui under the app's own ordinary account (the service files from easy-ui units do this).",
+            "Run easy-ui under the project's own ordinary account (the service files from easy-ui units do this).",
         )
     )
 
     st = config.state
-    folders = [st.root, st.auth]
-    files = [st.auth / n for n in (authmod.PASSWORD_FILE, "sessions.json", authmod.THROTTLE_FILE, authmod.DEVICES_FILE)]
+    # On a server the ui folder belongs to the project's account and lets the web account's group read it;
+    # then it only must not let others in, and auth/ must be private to this account.
+    shared = paths.dir_mode(st.root) == 0o750
+    folders = [st.auth] if shared else [st.root, st.auth]
+    files = [st.auth / n for n in (authmod.PASSWORD_FILE, "sessions.json", authmod.THROTTLE_FILE, authmod.DEVICES_FILE,
+                                   passkeys.PASSKEYS_FILE, passkeys.RECOVERY_FILE)]
     states = {p: _private(p) for p in folders + [f for f in files if f.exists()]}
-    if states[st.root] is None:
+    if shared:
+        try:
+            states[st.root] = (os.stat(st.root).st_mode & 0o027) == 0
+        except OSError:
+            states[st.root] = None
+    if states.get(st.root) is None or (shared and states.get(st.auth) is None):
         status, fix = "fail", "Create it by setting the password: ask the person to run easy-ui set-password."
     elif all(states.values()):
         status, fix = "ok", None
@@ -968,9 +1332,10 @@ def run_checks(config: AppConfig) -> dict[str, Any]:
     items.append(
         _item(
             "state_private",
-            "The app's private easy-ui folder can only be read by this account",
+            "The project's private easy-ui folder can only be read by this account",
             status,
-            "That folder holds the password hash and the sign-in sessions; other accounts on the computer must not read them.",
+            "That folder holds the password hash, the passkeys, the recovery codes and the sign-in sessions; other "
+            "accounts on the computer must not read them.",
             fix,
         )
     )
@@ -1098,7 +1463,7 @@ def _cmd_serve(args: argparse.Namespace) -> Any:
         raise Refused(
             "easy-ui will not run the dashboard server as the administrator (root), because a mistake in a web "
             "server running as root could take over the whole computer.",
-            hint="Run it under the app's own ordinary account (the service files from easy-ui units do this).",
+            hint="Run it under the project's own ordinary account (the service files from easy-ui units do this).",
             code="root_refused",
         )
     config = load_config(args)
@@ -1187,11 +1552,111 @@ def _cmd_check(args: argparse.Namespace) -> Any:
     return Result(report, "\n".join(lines), 0 if report["ok"] else 1)
 
 
+def _when(t: Any) -> str:
+    if not isinstance(t, (int, float)):
+        return "never"
+    d = _dt.datetime.fromtimestamp(float(t))
+    return f"{d.day} {d.strftime('%b')} {d.year} {d:%H:%M}"
+
+
+def _signin_status(config: AppConfig) -> dict[str, Any]:
+    auth_dir = config.state.auth
+    store = passkeys.PasskeyStore(auth_dir)
+    return {
+        "app": config.name,
+        "password_set": authmod.load_hash(auth_dir) is not None,
+        "password_sign_in": store.password_sign_in(),
+        "passkeys": store.listing(),
+        "recovery": passkeys.RecoveryCodes(auth_dir).status(),
+    }
+
+
+def _status_lines(st: dict[str, Any]) -> list[str]:
+    lines = []
+    if not st["password_set"]:
+        lines.append("Password: not set (set one with easy-ui set-password).")
+    else:
+        lines.append("Password: set, and " + ("can be used to sign in." if st["password_sign_in"] else "turned off for signing in."))
+    if st["passkeys"]:
+        lines.append(f"Passkeys ({len(st['passkeys'])}):")
+        for p in st["passkeys"]:
+            lines.append(f"  {p['name']}  (for {p['rp_id']}, added {_when(p['created'])}, last used {_when(p['last_used'])})  id {p['id']}")
+    else:
+        lines.append("Passkeys: none yet. Sign in on the dashboards page and open Sign-in settings to add one.")
+    r = st["recovery"]
+    lines.append(f"Recovery codes: {r['left']} of {r['total']} left." if r["total"] else "Recovery codes: none made yet (easy-ui recovery-codes).")
+    return lines
+
+
+def _cmd_passkeys_list(args: argparse.Namespace) -> Any:
+    from easyui.cli import Result, load_config  # noqa: PLC0415
+
+    st = _signin_status(load_config(args))
+    return Result(st, "\n".join(_status_lines(st)))
+
+
+def _cmd_passkeys_remove(args: argparse.Namespace) -> Any:
+    from easyui.cli import Result, load_config  # noqa: PLC0415
+
+    config = load_config(args)
+    store = passkeys.PasskeyStore(config.state.auth)
+    removed = store.remove(args.passkey, password_set=authmod.load_hash(config.state.auth) is not None)
+    text = f"Removed the passkey {removed['name']!r}; it can no longer be used to sign in."
+    if removed["password_sign_in_turned_on"]:
+        text += " It was the last one, so signing in with the password is on again."
+    return Result({"ok": True, "app": config.name, "removed": removed, **_signin_status(config)}, text)
+
+
+def _cmd_signin(args: argparse.Namespace) -> Any:
+    from easyui.cli import Result, load_config  # noqa: PLC0415
+
+    config = load_config(args)
+    if args.what is None:
+        st = _signin_status(config)
+        return Result(st, "\n".join(_status_lines(st)))
+    if args.what != "password" or args.state not in ("on", "off"):
+        raise UsageError("Say easy-ui sign-in password on, or easy-ui sign-in password off.", hint="Or easy-ui sign-in to see how sign-in is set up.")
+    store = passkeys.PasskeyStore(config.state.auth)
+    on = args.state == "on"
+    store.set_password_sign_in(on, password_set=authmod.load_hash(config.state.auth) is not None)
+    text = (
+        "Signing in with the password is on." if on else
+        "Signing in with the password is off: only passkeys and recovery codes sign in now. "
+        "Turn it back on with: easy-ui sign-in password on"
+    )
+    return Result({"ok": True, **_signin_status(config)}, text)
+
+
+def _cmd_recovery_codes(args: argparse.Namespace) -> Any:
+    from easyui.cli import Result, load_config  # noqa: PLC0415
+
+    config = load_config(args)
+    st = config.state.ensure()
+    tty = authmod.open_terminal()
+    if tty is None:
+        raise NeedsHuman(
+            "Recovery codes are shown only on this computer's terminal, to the person, so they are not shown here "
+            "(there is no terminal). Anyone who sees them could sign in.",
+            hint="Ask the person to run easy-ui recovery-codes in a terminal on the server, or to make them on the "
+            "Sign-in settings page of the dashboards.",
+        )
+    with tty:
+        codes = passkeys.RecoveryCodes(st.auth).make()
+        tty.write(
+            "\nNew recovery codes for the dashboards of " + config.name + ". Each one signs in once, when you have no "
+            "passkey at hand.\nWrite them down or keep them in your password manager. They are shown only now; the "
+            "old codes no longer work.\n\n" + "\n".join("  " + c for c in codes) + "\n\n"
+        )
+        tty.flush()
+    text = f"Made {len(codes)} new recovery codes and showed them on the terminal. The old codes no longer work."
+    return Result({"ok": True, "app": config.name, "made": len(codes), "shown_on": "terminal"}, text)
+
+
 def register(subparsers: Any) -> None:
     p = subparsers.add_parser(
         "serve",
-        help="Run the dashboard server for this app (only reachable from this computer).",
-        description="Run the dashboard server for this app. It listens on 127.0.0.1, on a local socket, or on the "
+        help="Run the dashboard server for this project (only reachable from this computer).",
+        description="Run the dashboard server for this project. It listens on 127.0.0.1, on a local socket, or on the "
         "socket systemd passes in. Started by systemd, it stops by itself when no one uses it (systemd starts it "
         "again on the next visit); started by hand, it runs until you stop it with Ctrl-C.",
     )
@@ -1218,15 +1683,47 @@ def register(subparsers: Any) -> None:
     p = subparsers.add_parser(
         "set-password",
         help="Set the sign-in password (the person types it at a hidden prompt).",
-        description="Set the password for signing in to this app's dashboards. The person types it on the "
+        description="Set the password for signing in to this project's dashboards. The person types it on the "
         "terminal; it is never taken from an argument or an environment variable. Signs out every browser.",
     )
     p.set_defaults(func=_cmd_set_password)
 
     p = subparsers.add_parser(
         "check",
-        help="Check that this app's dashboards can be served safely (a checklist).",
+        help="Check that this project's dashboards can be served safely (a checklist).",
         description="Check, from inside this configuration, that the server would not run as root, that its "
         "private folder is owner-only and that a password is set.",
     )
     p.set_defaults(func=_cmd_check)
+
+    p = subparsers.add_parser(
+        "passkeys",
+        help="List or remove the passkeys that can sign in.",
+        description="List the passkeys that can sign in to this project's dashboards, or remove one. Passkeys are "
+        "added on the dashboards page (Sign-in settings), by someone who is signed in.",
+    )
+    pk_sub = p.add_subparsers(dest="passkeys_command", metavar="<list|remove>")
+    p.set_defaults(func=_cmd_passkeys_list)
+    q = pk_sub.add_parser("list", help="List the passkeys (also: password and recovery codes).")
+    q.set_defaults(func=_cmd_passkeys_list)
+    q = pk_sub.add_parser("remove", help="Remove a passkey, by its id or name.")
+    q.add_argument("passkey", help="the passkey's id or name (see easy-ui passkeys list)")
+    q.set_defaults(func=_cmd_passkeys_remove)
+
+    p = subparsers.add_parser(
+        "sign-in",
+        help="How signing in is set up; turn password sign-in on or off.",
+        description="Show how signing in to the dashboards is set up, or turn signing in with the password on or "
+        "off (off needs at least one passkey).",
+    )
+    p.add_argument("what", nargs="?", choices=["password"], help="password")
+    p.add_argument("state", nargs="?", choices=["on", "off"], help="on or off")
+    p.set_defaults(func=_cmd_signin)
+
+    p = subparsers.add_parser(
+        "recovery-codes",
+        help="Make new one-time recovery codes (shown on the terminal only).",
+        description="Make 10 new recovery codes, each of which signs in once when no passkey is at hand. They are "
+        "shown on this computer's terminal only (never to an agent) and replace the old ones.",
+    )
+    p.set_defaults(func=_cmd_recovery_codes)

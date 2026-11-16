@@ -1,14 +1,14 @@
 """my-easy-ui: a dashboard server and browser renderer for one app at a time.
 
 A dashboard is a disposable, declarative view (a YAML file) over a read-only
-copy of an app's data. People and their AI agents can reshape dashboards at
+copy of a project's data. People and their AI agents can reshape dashboards at
 any time; the format never contains JavaScript, HTML or CSS.
 
 Modules
 -------
 ``easyui.errors``     error types, exit codes and HTTP statuses
 ``easyui.paths``      per-machine folders (app data, UI state)
-``easyui.appconfig``  reading ``app.toml`` ([app] and [ui])
+``easyui.appconfig``  reading ``project.toml`` ([project] and [ui])
 ``easyui.formats``    the value-format vocabulary (shared with the renderer)
 ``easyui.spec``       loading, validating and compiling dashboard files
 ``easyui.sandbox``    the read-only query sandbox

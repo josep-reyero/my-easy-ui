@@ -12,11 +12,11 @@ from conftest import run_cli, run_cli_json
 from easyui import units
 from easyui.errors import UsageError
 
-SAFE = {"app_path": "/srv/apps/fitness"}
+SAFE: dict = {}
 
 SERVICE_REQUIRED = [
-    "User=easyui-fitness",
-    "Group=easyui-fitness",
+    "User=mes-fitness-web",
+    "Group=mes-fitness-web",
     "NoNewPrivileges=yes",
     "ProtectSystem=strict",
     "ProtectHome=yes",
@@ -29,16 +29,15 @@ SERVICE_REQUIRED = [
     "SystemCallFilter=@system-service",
     "MemoryMax=256M",
     "UMask=0077",
-    "BindReadOnlyPaths=/var/lib/easy-ui/fitness/specs /var/lib/easy-ui/fitness/data",
-    "BindPaths=/var/lib/easy-ui/fitness/auth",
-    "TemporaryFileSystem=/var/lib/easy-ui:ro",
-    "InaccessiblePaths=-/var/lib/mes",
-    "ExecStart=/usr/local/bin/easy-ui serve --app-dir /srv/apps/fitness",
-    "Requires=easy-ui-fitness.socket",
-    'Environment="EASYUI_STATE_HOME=/var/lib/easy-ui" "MES_DATA_HOME=/var/lib/mes" "HOME=/nonexistent"',
+    "TemporaryFileSystem=/var/lib/mes:ro",
+    "BindReadOnlyPaths=/var/lib/mes/fitness/ui",
+    "BindPaths=/var/lib/mes/fitness/ui/auth",
+    "ExecStart=/usr/local/bin/easy-ui serve --ui-dir /var/lib/mes/fitness/ui",
+    "Requires=mes-fitness-web.socket",
+    'Environment="HOME=/nonexistent" "MES_CONFIG=/nonexistent"',
 ]
 SOCKET_REQUIRED = [
-    "ListenStream=/run/easy-ui/fitness.sock",
+    "ListenStream=/run/mes/fitness-web.sock",
     "SocketMode=0600",
     "SocketUser=root",
     "Accept=no",
@@ -77,8 +76,8 @@ def parse_unit(text: str) -> list[tuple[str, str, str]]:
 
 def test_render_defaults():
     u = units.render_units("fitness", title="My fitness", **SAFE)
-    assert list(u) == ["easy-ui-fitness.socket", "easy-ui-fitness.service"]
-    service, sock = u["easy-ui-fitness.service"], u["easy-ui-fitness.socket"]
+    assert list(u) == ["mes-fitness-web.socket", "mes-fitness-web.service"]
+    service, sock = u["mes-fitness-web.service"], u["mes-fitness-web.socket"]
     lines_service, lines_socket = service.split("\n"), sock.split("\n")
     for need in SERVICE_REQUIRED:
         assert need in lines_service, need
@@ -95,20 +94,19 @@ def test_render_defaults():
 
 
 def test_no_shell_in_execstart():
-    service = units.render_units("fitness", **SAFE)["easy-ui-fitness.service"]
+    service = units.render_units("fitness", **SAFE)["mes-fitness-web.service"]
     exec_line = next(v for _s, k, v in parse_unit(service) if k == "ExecStart")
     assert not re.search(r"\b(sh|bash|zsh)\b|-c\b|[;&|`]", exec_line)
     assert exec_line.split()[0].startswith("/")
 
 
 def test_options():
-    u = units.render_units("fitness", user="eui-fit", exec_path="/opt/easy-ui/bin/easy-ui", app_path="/opt/apps/fitness",
-                           state_home="/srv/state/easy-ui", data_home="/srv/data/mes", socket_path="/run/eui/fit.sock",
+    u = units.render_units("fitness", exec_path="/opt/easy-ui/bin/easy-ui", root="/srv/mes", socket_path="/run/eui/fit.sock",
                            socket_owner="tailscale", memory_max="128M")
-    service, sock = u["easy-ui-fitness.service"], u["easy-ui-fitness.socket"]
-    assert "User=eui-fit" in service and "MemoryMax=128M" in service
-    assert "ExecStart=/opt/easy-ui/bin/easy-ui serve --app-dir /opt/apps/fitness" in service
-    assert "BindReadOnlyPaths=/srv/state/easy-ui/fitness/specs /srv/state/easy-ui/fitness/data" in service
+    service, sock = u["mes-fitness-web.service"], u["mes-fitness-web.socket"]
+    assert "User=mes-fitness-web" in service and "MemoryMax=128M" in service
+    assert "ExecStart=/opt/easy-ui/bin/easy-ui serve --ui-dir /srv/mes/fitness/ui" in service
+    assert "TemporaryFileSystem=/srv/mes:ro" in service and "BindPaths=/srv/mes/fitness/ui/auth" in service
     assert "ListenStream=/run/eui/fit.sock" in sock and "SocketUser=tailscale" in sock
 
 
@@ -162,7 +160,7 @@ HOSTILE_PATHS = [
 
 @pytest.mark.parametrize(
     "field,path",
-    [(f, p) for f in ("app_path", "exec_path", "state_home", "data_home", "socket_path") for p in HOSTILE_PATHS
+    [(f, p) for f in ("exec_path", "root", "socket_path") for p in HOSTILE_PATHS
      if not (f == "socket_path" and not p)],  # an empty socket path means the default one
 )
 def test_hostile_paths_are_refused(field, path):
@@ -173,8 +171,6 @@ def test_hostile_paths_are_refused(field, path):
 
 @pytest.mark.parametrize("user", ["root\nUser=root", "Root", "1abc", "a b", "x" * 33, "a$b", "a%b", "", 5])
 def test_hostile_users_are_refused(user):
-    with pytest.raises(UsageError):
-        units.render_units("fitness", user=user, **SAFE)
     with pytest.raises(UsageError):
         units.render_units("fitness", socket_owner=user, **SAFE)
 
@@ -206,7 +202,7 @@ def test_hostile_title_stays_one_safe_line(title):
         assert not re.search(r"(?<!%)%(?!%)", d.replace("%%", ""))
         assert "$" not in d.replace("$$", "")
         assert all(c.isprintable() for c in d)
-    service = u["easy-ui-fitness.service"]
+    service = u["mes-fitness-web.service"]
     keys = [k for _s, k, _v in parse_unit(service)]
     assert keys.count("User") == 1 and "ExecStartPre" not in keys
     assert [line for line in service.split("\n") if line.startswith("[")] == ["[Unit]", "[Service]"]
@@ -224,37 +220,51 @@ def test_escape_value_and_clean_text():
 
 
 def test_home_folders_are_refused():
-    for field, value in (("app_path", "/home/someone/app"), ("state_home", "/root/state"),
-                         ("exec_path", "/home/someone/.local/bin/easy-ui"), ("app_path", "/run/user/1000/app")):
+    for field, value in (("root", "/home/someone/mes"), ("exec_path", "/home/someone/.local/bin/easy-ui"),
+                         ("root", "/run/user/1000/mes")):
         with pytest.raises(UsageError) as ei:
             units.render_units("fitness", **{**SAFE, field: value})
         assert "home folder" in ei.value.message
 
 
 @pytest.mark.parametrize("kw", [
-    {"app_path": "/var/lib/easy-ui/fitness"},
-    {"state_home": "/srv/apps/fitness/state"},
-    {"state_home": "/var/lib/mes/easy-ui"},
-    {"data_home": "/var/lib/easy-ui/data"},
+    {"exec_path": "/var/lib/mes/fitness/code/current/.venv/bin/easy-ui"},
+    {"exec_path": "/tmp/easy-ui"},
+    {"socket_path": "/var/lib/mes/fitness/ui/web.sock"},
+    {"socket_owner": "mes-fitness"},
+    {"socket_owner": "www-data"},
 ])
-def test_overlapping_folders_are_refused(kw):
+def test_places_and_owners_the_project_account_controls_are_refused(kw):
     with pytest.raises(UsageError):
         units.render_units("fitness", **{**SAFE, **kw})
 
 
-def test_long_default_user_needs_option():
-    app = "a" + "b" * 29
+def test_long_project_names_are_refused_for_servers():
+    ok = "a" * 24  # mes-<24>-web is 32 characters
+    assert f"User=mes-{ok}-web" in units.render_units(ok)[f"mes-{ok}-web.service"]
     with pytest.raises(UsageError) as ei:
-        units.render_units(app, **SAFE)
-    assert "--user" in ei.value.hint
-    assert "User=eui-x" in units.render_units(app, user="eui-x", **SAFE)[f"easy-ui-{app}.service"]
+        units.render_units("a" * 25)
+    assert ei.value.code == "name_too_long"
+
+
+def test_folders_for_the_administrator():
+    f = {d["path"]: d for d in units.folders("fitness")}
+    assert f["/var/lib/mes/fitness/ui/auth"] == {
+        "path": "/var/lib/mes/fitness/ui/auth", "owner": "mes-fitness-web", "group": "mes-fitness-web", "mode": "0700",
+        "why": f["/var/lib/mes/fitness/ui/auth"]["why"],
+    }
+    for p in ("/var/lib/mes/fitness/ui", "/var/lib/mes/fitness/ui/data", "/var/lib/mes/fitness/ui/specs"):
+        assert (f[p]["owner"], f[p]["group"], f[p]["mode"]) == ("mes-fitness", "mes-fitness-web", "2750")
+    assert f["/var/lib/mes/fitness"]["mode"] == "0710"
+    text = units.render_units("fitness")["mes-fitness-web.service"]
+    assert "/var/lib/mes/fitness/ui/auth" in text.split("[Unit]")[0]  # also in the header comment
 
 
 def test_write_units(tmp_path):
     u = units.render_units("fitness", **SAFE)
     written = units.write_units(u, tmp_path / "out")
-    assert sorted(os.path.basename(p) for p in written) == ["easy-ui-fitness.service", "easy-ui-fitness.socket"]
-    assert (tmp_path / "out" / "easy-ui-fitness.service").read_text() == u["easy-ui-fitness.service"]
+    assert sorted(os.path.basename(p) for p in written) == ["mes-fitness-web.service", "mes-fitness-web.socket"]
+    assert (tmp_path / "out" / "mes-fitness-web.service").read_text() == u["mes-fitness-web.service"]
 
 
 def test_write_units_does_not_follow_links(tmp_path):
@@ -262,7 +272,7 @@ def test_write_units_does_not_follow_links(tmp_path):
     out.mkdir()
     victim = tmp_path / "victim"
     victim.write_text("keep me")
-    os.symlink(victim, out / "easy-ui-fitness.socket")
+    os.symlink(victim, out / "mes-fitness-web.socket")
     with pytest.raises(UsageError):
         units.write_units(units.render_units("fitness", **SAFE), out)
     assert victim.read_text() == "keep me"
@@ -280,30 +290,25 @@ def test_cli_requires_render_only(demo_app):
 
 
 def test_cli_render_json(demo_app):
-    code, data = run_cli_json("units", "--render-only", "--app-path", "/srv/apps/demo")
-    assert code == 0 and data["app"] == "demo" and data["written"] == []
-    assert "ExecStart=/usr/local/bin/easy-ui serve --app-dir /srv/apps/demo" in data["units"]["easy-ui-demo.service"]
+    code, data = run_cli_json("units", "--render-only")
+    assert code == 0 and data["app"] == data["project"] == "demo" and data["written"] == []
+    assert data["accounts"] == {"project": "mes-demo", "web": "mes-demo-web"}
+    assert data["ui_dir"] == "/var/lib/mes/demo/ui" and data["enable"] == ["mes-demo-web.socket"]
+    assert data["socket"] == "/run/mes/demo-web.sock" and len(data["folders"]) == 5
+    assert "ExecStart=/usr/local/bin/easy-ui serve --ui-dir /var/lib/mes/demo/ui" in data["units"]["mes-demo-web.service"]
 
 
 def test_cli_render_text_and_out(demo_app, tmp_path):
-    code, out, _ = run_cli("units", "--render-only", "--app-path", "/srv/apps/demo")
-    assert code == 0 and "### easy-ui-demo.socket" in out and "### easy-ui-demo.service" in out
-    code, out, _ = run_cli("units", "--render-only", "--app-path", "/srv/apps/demo", "--out", str(tmp_path / "u"),
-                           "--user", "eui-demo", "--json")
+    code, out, _ = run_cli("units", "--render-only")
+    assert code == 0 and "### mes-demo-web.socket" in out and "### mes-demo-web.service" in out
+    code, out, _ = run_cli("units", "--render-only", "--root", "/srv/mes", "--out", str(tmp_path / "u"), "--json",
+                           "--allow-host", "box.example.ts.net")
     data = json.loads(out)
     assert code == 0 and len(data["written"]) == 2
-    assert "User=eui-demo" in (tmp_path / "u" / "easy-ui-demo.service").read_text()
+    text = (tmp_path / "u" / "mes-demo-web.service").read_text()
+    assert "BindReadOnlyPaths=/srv/mes/demo/ui" in text and 'EASYUI_ALLOW_HOSTS=box.example.ts.net"' in text
 
 
 def test_cli_hostile_option(demo_app):
-    code, data = run_cli_json("units", "--render-only", "--app-path", "/srv/x\nUser=root")
+    code, data = run_cli_json("units", "--render-only", "--root", "/srv/x\nUser=root")
     assert code == 2 and data["error"]["code"] == "usage"
-
-
-def test_cli_default_app_path_is_validated(demo_app):
-    # the demo app lives in a temporary folder; its path is valid or refused with a plain message, never injected
-    code, data = run_cli_json("units", "--render-only")
-    if code == 0:
-        assert f"--app-dir {demo_app.app_dir.resolve()}" in data["units"]["easy-ui-demo.service"]
-    else:
-        assert code == 2 and "service file" in data["error"]["message"]

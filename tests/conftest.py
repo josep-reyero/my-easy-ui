@@ -14,7 +14,7 @@ Helpers
     about 70 activities, a ``weekly`` view and a ``private_notes`` table that is
     NOT allowlisted (so tests can prove it never reaches dashboards).
 ``make_demo_app(base, *, name="demo", dashboards=True) -> DemoApp``
-    Creates ``base/app`` (app.toml + ui/dashboards/*.yaml), ``base/data``
+    Creates ``base/app`` (project.toml + ui/dashboards/*.yaml), ``base/data``
     (MES_DATA_HOME) and ``base/state`` (EASYUI_STATE_HOME). Does not touch
     the environment; ``DemoApp.env()`` gives the two variables.
 ``DemoApp``  ``base``, ``app_dir``, ``data_home``, ``state_home``, ``db_path``,
@@ -101,6 +101,14 @@ def run_cli(*argv: str) -> tuple[int, str, str]:
 def run_cli_json(*argv: str) -> tuple[int, Any]:
     code, out, _err = run_cli("--json", *argv)
     return code, json.loads(out)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_machine(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test reads this computer's own mes settings or server layout."""
+    monkeypatch.setenv("MES_CONFIG", str(tmp_path_factory.mktemp("cfg") / "config.toml"))
+    for k in ("MES_ROOT", "MES_STATE_HOME", "EASYUI_ALLOW_HOSTS"):
+        monkeypatch.delenv(k, raising=False)
 
 
 @pytest.fixture

@@ -33,6 +33,11 @@ API_ROUTES = [
     ("GET", "/api/dashboards/overview"),
     ("GET", "/api/rev"),
     ("POST", "/api/query"),
+    ("GET", "/api/signin"),
+    ("POST", "/api/signin/password"),
+    ("POST", "/api/passkeys/register"),
+    ("POST", "/api/passkeys/remove"),
+    ("POST", "/api/recovery-codes"),
     ("GET", "/api/nope"),
     ("POST", "/api/nope"),
 ]
@@ -198,7 +203,11 @@ def assert_error(r, status, code=None):
 def test_session_endpoint_before_sign_in(client):
     r = client.get("/api/session")
     assert r.status_code == 200
-    assert r.json() == {"signed_in": False, "app": {"name": "demo", "title": "Demo app", "accent": "#2f6fdf"}}
+    assert r.json() == {
+        "signed_in": False,
+        "app": {"name": "demo", "title": "Demo app", "accent": "#2f6fdf"},
+        "sign_in": {"password": True, "passkeys": False, "passkeys_here": True, "recovery": False},
+    }
 
 
 @pytest.mark.parametrize(("method", "path"), API_ROUTES)
@@ -612,7 +621,10 @@ def test_security_headers_on_every_response(client, path):
     assert h["cross-origin-resource-policy"] == "same-origin"
     assert h["x-frame-options"] == "DENY"
     pp = [p.strip() for p in h["permissions-policy"].split(",")]
-    assert "camera=()" in pp and "geolocation=()" in pp and all(p.endswith("=()") for p in pp)
+    assert "camera=()" in pp and "geolocation=()" in pp
+    # Every feature is denied except passkeys, which only this site itself may use.
+    allowed = {p for p in pp if not p.endswith("=()")}
+    assert allowed == {"publickey-credentials-create=(self)", "publickey-credentials-get=(self)"}
     # Chromium warns about features it does not know on every page load.
     assert not any(p.startswith(("ambient-light-sensor", "battery")) for p in pp)
     assert "server" not in h

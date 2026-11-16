@@ -253,15 +253,21 @@ export function axisFormatter(fmt, max) {
 }
 
 /**
- * A round tick step for time-based formats (seconds), so axes read 0, 30 min,
- * 1 h rather than 0, 33 min, 67 min. null lets the chart choose.
+ * A round tick step for time and distance formats (seconds, metres), so axes
+ * read 0, 30 min, 1 h rather than 0, 33 min, 67 min, and 0, 20 km, 40 km.
+ * null lets the chart choose.
  */
 export function axisStep(fmt, max) {
-  if (fmt !== "duration" && fmt !== "pace") return null;
+  if (fmt !== "duration" && fmt !== "pace" && fmt !== "distance") return null;
   if (!(max > 0)) return null;
-  const steps = fmt === "pace"
-    ? [5, 10, 15, 30, 60, 120, 300, 600]
-    : [60, 120, 300, 600, 900, 1200, 1800, 3600, 7200, 10800, 21600, 43200, 86400];
+  const STEPS = {
+    pace: [5, 10, 15, 30, 60, 120, 300, 600],
+    duration: [60, 120, 300, 600, 900, 1200, 1800, 3600, 7200, 10800, 21600, 43200, 86400],
+    // metres: whole kilometres once the axis is in km (no "2.5 km" lines)
+    distance: [100, 200, 250, 500, 1000, 2000, 5000, 10000, 20000, 25000, 50000, 100000, 200000, 250000, 500000,
+      1000000, 2000000, 5000000, 10000000],
+  };
+  const steps = STEPS[fmt];
   for (const s of steps) if (max / s <= 4) return s;
   return null;
 }

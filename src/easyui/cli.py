@@ -7,6 +7,8 @@ be loaded its commands still exist and explain that they are not available:
 
 - ``easyui.server``:  ``serve``, ``set-password``, ``check``
 - ``easyui.publish``: ``publish``, ``versions``, ``rollback``, ``preview``, ``units``
+- ``easyui.export``: ``export``
+- ``easyui.screenshot``: ``screenshot``
 
 Contract for a feature module
 -----------------------------
@@ -18,7 +20,7 @@ Contract for a feature module
   never ``"command"``.
 - Every leaf parser sets ``set_defaults(func=handler)``. ``handler(args)``
   gets the ``argparse.Namespace`` with ``args.json`` (bool) and
-  ``args.app_dir`` (``Path | None``) already set. Use
+  ``args.project_dir`` (also as ``args.app_dir``) and ``args.ui_dir`` (``Path | None``) already set. Use
   ``easyui.cli.load_config(args)`` to get the ``AppConfig``.
 - Return the data (dict, list, str or None) or a ``Result(data, text=None,
   exit_code=0, json_line=False)`` to also give the plain-language text shown
@@ -33,7 +35,7 @@ Contract for a feature module
 - Text shown without ``--json`` goes through ``safe_text``: control
   characters (which could clear or retitle the terminal, or fake a line) from
   dashboard files are shown as visible escapes such as ``\x1b``.
-- ``--json`` and ``--app-dir PATH`` are taken off the command line before
+- ``--json``, ``--project-dir PATH`` (old name ``--app-dir``) and ``--ui-dir PATH`` are taken off the command line before
   parsing, so they work in any position; do not add them yourself.
 
 Exit codes: 0 ok, 1 error, 2 usage, 3 not found, 4 not allowed, 5 refused
@@ -69,12 +71,15 @@ from easyui import __version__, appconfig, bundle, formats, paths, spec
 from easyui.appconfig import AppConfig
 from easyui.errors import EasyUIError, NotAvailable, NotFound, UsageError
 
-COMMAND_MODULES = ("easyui.server", "easyui.publish")
+COMMAND_MODULES = ("easyui.server", "easyui.publish", "easyui.export", "easyui.screenshot")
 PLANNED_COMMANDS: dict[str, dict[str, str]] = {
     "easyui.server": {
-        "serve": "Run the dashboard server for this app.",
+        "serve": "Run the dashboard server for this project.",
         "set-password": "Set the sign-in password (typed by the person).",
-        "check": "Check that this app's dashboards can be served.",
+        "check": "Check that this project's dashboards can be served.",
+        "passkeys": "List or remove the passkeys that can sign in.",
+        "sign-in": "How signing in is set up; turn password sign-in on or off.",
+        "recovery-codes": "Make new one-time recovery codes.",
     },
     "easyui.publish": {
         "publish": "Publish the dashboards so the server shows them.",
@@ -82,6 +87,12 @@ PLANNED_COMMANDS: dict[str, dict[str, str]] = {
         "rollback": "Go back to an earlier published version.",
         "preview": "Preview the dashboards on this computer before publishing.",
         "units": "Show the service files that run the server.",
+    },
+    "easyui.export": {
+        "export": "Make a static copy of chosen dashboards (no server needed).",
+    },
+    "easyui.screenshot": {
+        "screenshot": "Take a picture of a dashboard with a locally installed Chromium.",
     },
 }
 
@@ -162,7 +173,7 @@ def print_now(data: Any, text: str, json_mode: bool) -> None:
 
 
 def load_config(args: argparse.Namespace) -> AppConfig:
-    return appconfig.load(getattr(args, "app_dir", None))
+    return appconfig.load(getattr(args, "app_dir", None), ui_dir=getattr(args, "ui_dir", None))
 
 
 # ---------------------------------------------------------------- commands
@@ -193,8 +204,8 @@ def _cmd_tables(args: argparse.Namespace) -> Result:
         db = cfg.source_db()
         if not db.is_file():
             raise NotFound(
-                f"The app's data file {paths.display_path(db)} does not exist yet.",
-                hint="Run the app's job or command that creates its data first, or check [ui] data in app.toml.",
+                f"The project's data file {paths.display_path(db)} does not exist yet.",
+                hint="Run the project's job or command that creates its data first, or check [ui] data in project.toml.",
             )
         tables = bundle.describe_tables(db, samples=samples, immutable=False)
         allowed = {t.lower() for t in cfg.tables}
@@ -202,8 +213,8 @@ def _cmd_tables(args: argparse.Namespace) -> Result:
             t["in_dashboards"] = t["name"].lower() in allowed
         data = {"app": cfg.name, "from": "app data file", "bundle": None, "tables": tables}
         intro = (
-            "Tables and views in the app's data file. Only those marked * are copied for dashboards "
-            "([ui] tables in app.toml):"
+            "Tables and views in the project's data file. Only those marked * are copied for dashboards "
+            "([ui] tables in project.toml):"
         )
     else:
         current = bundle.require_current(cfg)
@@ -228,7 +239,7 @@ def _validate_without_app(files: list[str]) -> dict[str, Any]:
     return {
         "ok": n_err == 0,
         "app": None,
-        "data": {"checked": False, "bundle": None, "note": "No app.toml was found, so queries were not checked against data."},
+        "data": {"checked": False, "bundle": None, "note": "No project.toml was found, so queries were not checked against data."},
         "dashboards": entries,
         "errors": n_err,
         "warnings": sum(len(e["warnings"]) for e in entries),
@@ -273,9 +284,9 @@ def _cmd_data_build(args: argparse.Namespace) -> Result:
     res = bundle.build(cfg, keep=args.keep)
     parts = ", ".join(f"{name} ({t['rows']} rows)" for name, t in res["tables"].items())
     if res["unchanged"]:
-        text = f"The app's data has not changed since the last build, so the dashboards keep using it: {parts}."
+        text = f"The project's data has not changed since the last build, so the dashboards keep using it: {parts}."
     else:
-        text = f"Built new dashboard data from the app's data file: {parts}. Open dashboards will show it on their next refresh."
+        text = f"Built new dashboard data from the project's data file: {parts}. Open dashboards will show it on their next refresh."
     return Result(res, text)
 
 
@@ -306,20 +317,22 @@ def _add_placeholder(sub: argparse._SubParsersAction, name: str, about: str, mod
 def build_parser() -> tuple[ArgumentParser, list[str]]:
     parser = ArgumentParser(
         prog="easy-ui",
-        description="Dashboards for one app: declarative views over a read-only copy of its data.",
-        epilog="Every command accepts --json (only JSON on stdout) and --app-dir PATH (default: the nearest folder "
-        "with app.toml), before or after the command.",
+        description="Dashboards for one project: declarative views over a read-only copy of its data.",
+        epilog="Every command accepts --json (only JSON on stdout), --project-dir PATH (default: the nearest folder "
+        "with project.toml) and --ui-dir PATH (the project's dashboard folder, when it is not the usual one), "
+        "before or after the command.",
     )
     parser.add_argument("--version", action="version", version=f"easy-ui {__version__}")
     parser.add_argument("--json", action="store_true", help="print only JSON on stdout")
-    parser.add_argument("--app-dir", metavar="PATH", help="the app's folder (the one holding app.toml)")
+    parser.add_argument("--project-dir", metavar="PATH", help="the project's folder (the one holding project.toml)")
+    parser.add_argument("--ui-dir", metavar="PATH", help="the project's dashboard folder (published dashboards, data, sign-in)")
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
     p = sub.add_parser("components", help="The dashboard vocabulary: components, settings, formats (for agents).")
     p.set_defaults(func=_cmd_components)
 
     p = sub.add_parser("tables", help="Tables and columns dashboards can read, with sample values.")
-    p.add_argument("--source", action="store_true", help="list the app's own data file instead (marks what is copied)")
+    p.add_argument("--source", action="store_true", help="list the project's own data file instead (marks what is copied)")
     p.add_argument("--samples", type=int, default=3, help="sample values per column (0-10, default 3)")
     p.set_defaults(func=_cmd_tables)
 
@@ -330,7 +343,7 @@ def build_parser() -> tuple[ArgumentParser, list[str]]:
 
     p = sub.add_parser("data", help="Build or list the dashboard data (a read-only copy of the allowed tables).")
     data_sub = p.add_subparsers(dest="data_command", metavar="<build|list>")
-    b = data_sub.add_parser("build", help="Copy the tables listed in app.toml into new dashboard data.")
+    b = data_sub.add_parser("build", help="Copy the tables listed in project.toml into new dashboard data.")
     b.add_argument("--keep", type=int, default=bundle.DEFAULT_KEEP, help="how many builds to keep (default 3)")
     b.set_defaults(func=_cmd_data_build)
     lst = data_sub.add_parser("list", help="List the builds of the dashboard data.")
@@ -355,9 +368,14 @@ def build_parser() -> tuple[ArgumentParser, list[str]]:
     return parser, problems
 
 
-def _extract(argv: list[str]) -> tuple[bool, Path | None, list[str]]:
+# Taken off the command line before parsing, so they work before or after the command.
+# --app-dir is the v0.1 name of --project-dir and still works.
+_FOLDER_OPTIONS = {"--project-dir": "project_dir", "--app-dir": "project_dir", "--ui-dir": "ui_dir"}
+
+
+def _extract(argv: list[str]) -> tuple[bool, dict[str, Path | None], list[str]]:
     json_mode = False
-    app_dir: Path | None = None
+    folders: dict[str, Path | None] = {"project_dir": None, "ui_dir": None}
     rest: list[str] = []
     i = 0
     while i < len(argv):
@@ -365,21 +383,24 @@ def _extract(argv: list[str]) -> tuple[bool, Path | None, list[str]]:
         if a == "--":
             rest.extend(argv[i:])
             break
+        opt = a.split("=", 1)[0]
         if a == "--json":
             json_mode = True
-        elif a == "--app-dir" or a.startswith("--app-dir="):
-            if a == "--app-dir":
+        elif opt in _FOLDER_OPTIONS:
+            if "=" not in a:
                 if i + 1 >= len(argv) or not argv[i + 1]:
-                    raise UsageError("--app-dir needs a folder after it.", hint="For example: --app-dir ./myapp")
+                    raise UsageError(f"{opt} needs a folder after it.", hint=f"For example: {opt} ./myproject")
                 value = argv[i + 1]
                 i += 1
             else:
                 value = a.split("=", 1)[1]
-            app_dir = Path(value).expanduser()
+            if not value:
+                raise UsageError(f"{opt} needs a folder after it.", hint=f"For example: {opt} ./myproject")
+            folders[_FOLDER_OPTIONS[opt]] = Path(value).expanduser()
         else:
             rest.append(a)
         i += 1
-    return json_mode, app_dir, rest
+    return json_mode, folders, rest
 
 
 def _emit_error(e: EasyUIError, json_mode: bool) -> None:
@@ -400,13 +421,15 @@ def run(argv: Sequence[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     json_mode = "--json" in raw
     try:
-        json_mode, app_dir, rest = _extract(raw)
+        json_mode, folders, rest = _extract(raw)
         parser, _problems = build_parser()
         args, extra = parser.parse_known_args(rest)
         if extra and not getattr(getattr(args, "func", None), "accepts_any_arguments", False):
             parser.error(f"unrecognized arguments: {' '.join(extra)}")
         args.json = json_mode
-        args.app_dir = app_dir
+        args.app_dir = folders["project_dir"]
+        args.project_dir = folders["project_dir"]
+        args.ui_dir = folders["ui_dir"]
         func = getattr(args, "func", None)
         if func is None:
             if args.command == "data":

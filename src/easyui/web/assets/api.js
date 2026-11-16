@@ -1,18 +1,14 @@
 // The only module that talks to the server. Every call returns parsed JSON
 // or throws an ApiError whose message and hint are written for people.
+// (A static export replaces this module with static-api.js, which has the same api.)
+
+import { ApiError, describe } from "./errors.js";
+
+export { ApiError, describe };
 
 const BASE = new URL("api/", document.baseURI);
-
-export class ApiError extends Error {
-  constructor({ status = 0, code = "error", message, hint = null, retryAfter = null, problems = null }) {
-    super(message);
-    this.status = status;
-    this.code = code;
-    this.hint = hint;
-    this.retryAfter = retryAfter; // seconds, when the server asks us to wait
-    this.problems = problems;
-  }
-}
+// A wrong password or code on these is an answer, not a sign that the session ended.
+const SIGN_IN_PATHS = new Set(["login", "recovery", "passkeys/login"]);
 
 // Plain fallbacks for when the server's answer carries no message of its own.
 function fallback(status) {
@@ -87,7 +83,7 @@ async function call(method, path, body) {
     retryAfter: retryAfterOf(res, err),
     problems: err && Array.isArray(err.problems) ? err.problems : null,
   });
-  if (res.status === 401 && path !== "login") {
+  if (res.status === 401 && !SIGN_IN_PATHS.has(path)) {
     window.dispatchEvent(new CustomEvent("easyui:signedout"));
   }
   throw error;
@@ -101,14 +97,12 @@ export const api = {
   dashboard: (slug) => call("GET", `dashboards/${encodeURIComponent(slug)}`),
   query: (dashboard, queries, params) => call("POST", "query", { dashboard, queries, params }),
   rev: () => call("GET", "rev"),
+  passkeyOptions: (purpose) => call("POST", "passkeys/options", { purpose }),
+  passkeyLogin: (credential) => call("POST", "passkeys/login", { credential }),
+  passkeyRegister: (credential, name) => call("POST", "passkeys/register", { credential, name }),
+  passkeyRemove: (id) => call("POST", "passkeys/remove", { id }),
+  signInSettings: () => call("GET", "signin"),
+  passwordSignIn: (on) => call("POST", "signin/password", { on }),
+  recoveryCodes: () => call("POST", "recovery-codes", {}),
+  recoveryLogin: (code) => call("POST", "recovery", { code }),
 };
-
-/** Turn any thrown value into {message, hint, code} for display. */
-export function describe(error) {
-  if (error instanceof ApiError) return { message: error.message, hint: error.hint, code: error.code };
-  return {
-    message: "This part of the page could not be shown.",
-    hint: "Reload the page. If it keeps happening, ask your agent to run easy-ui check.",
-    code: "client_error",
-  };
-}

@@ -338,16 +338,22 @@ export class Table extends Frame {
       );
       return th;
     })));
+    // On phones each row becomes a small card of "label  value" lines (CSS reads data-label), unless phone: scroll.
+    const cards = this.comp.phone !== "scroll";
     const tbody = h("tbody", null, shown.map((r) => h("tr", null, cols.map((c) => {
       const v = r[c.index];
-      return h("td", { class: [c.numeric ? "num" : null, v === null ? "is-null" : null], text: display(c.format, v) });
+      return h("td", {
+        class: [c.numeric ? "num" : null, v === null ? "is-null" : null],
+        dataset: { label: c.label },
+        text: display(c.format, v),
+      });
     }))));
 
     const label = this.comp.title || "Table";
     const scroller = h("div", {
-      class: "table-scroll",
+      class: ["table-scroll", cards ? "t-cards" : null],
       tabIndex: 0,
-      attrs: { role: "region", "aria-label": `${label} (scrolls sideways)` },
+      attrs: { role: "region", "aria-label": cards ? label : `${label} (scrolls sideways)` },
     }, h("table", null, [h("caption", { class: "sr-only", text: label }), thead, tbody]));
 
     const notes = [];
@@ -407,6 +413,16 @@ function debounce(fn, ms) {
   return wrapped;
 }
 
+function fixedText(p, value) {
+  if (p.type === "choice") {
+    const o = (p.options || []).find((x) => String(x.value) === String(value));
+    return o ? String(o.label) : String(value);
+  }
+  if (p.type === "date") return display("date", value);
+  if (p.type === "text") return value === "" ? "(empty)" : String(value);
+  return display("integer", value);
+}
+
 export class Controls {
   constructor(comp, ctx) {
     this.comp = comp;
@@ -423,6 +439,22 @@ export class Controls {
       hidden: true,
     });
     const names = (Array.isArray(comp.params) ? comp.params : []).filter((n) => ctx.paramDefs.has(n));
+    // A shared copy shows its settings as plain values; a picture (fixed: "picture") draws the real inputs.
+    if (ctx.fixed === true) {
+      this.el = h("section", {
+        class: "c c-controls is-fixed",
+        attrs: { "aria-labelledby": comp.title ? titleId : null, "aria-label": comp.title ? null : "Settings of this copy" },
+      }, [
+        comp.title ? h("h2", { class: "c-title", id: titleId, text: comp.title }) : null,
+        h("dl", { class: "fixed-values" }, names.map((n) => {
+          const p = ctx.paramDefs.get(n);
+          return h("div", { class: "fixed-value" }, [h("dt", { text: p.label }), h("dd", { text: fixedText(p, ctx.params.get(n)) })]);
+        })),
+        h("p", { class: "fixed-note", text: "This shared copy shows the numbers for these settings." }),
+      ]);
+      this.unsubscribe = () => {};
+      return;
+    }
     this.el = h("section", {
       class: "c c-controls",
       attrs: { "aria-labelledby": comp.title ? titleId : null, "aria-label": comp.title ? null : "Settings" },
@@ -436,6 +468,7 @@ export class Controls {
   }
 
   syncAll() {
+    if (this.ctx.fixed === true) return;
     for (const [name, input] of this.inputs) input.sync(this.ctx.params.get(name));
     this.reset.hidden = !this.ctx.paramsDiffer();
   }
@@ -544,6 +577,7 @@ export class Controls {
 
   /** Show a problem with a value the server refused. */
   showParamError(err) {
+    if (this.ctx.fixed === true) return;
     this.say(err && err.message ? `${err.message}${err.hint ? ` ${err.hint}` : ""}` : "");
   }
 

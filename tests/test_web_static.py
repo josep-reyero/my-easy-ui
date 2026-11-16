@@ -145,10 +145,15 @@ FORBIDDEN = {
 def test_js_uses_no_markup_or_code_from_text(path):
     text = path.read_text(encoding="utf-8")
     found = [name for name, rx in FORBIDDEN.items() if rx.search(text)]
+    if path.name == "static-api.js":
+        # A locked export keeps its link key for that browser tab only (sessionStorage), nothing else.
+        assert set(re.findall(r"\b(?:local|session)Storage\b", text)) == {"sessionStorage"}
+        found = [f for f in found if f != "localStorage"]
     assert not found, f"{path.name} uses {found}"
 
 
-ALLOWED_URLS = {"http://www.w3.org/2000/svg"}
+# The SVG namespace, and http://localhost in text that tells people where passkeys work (never fetched).
+ALLOWED_URLS = {"http://www.w3.org/2000/svg", "http://localhost"}
 
 
 @pytest.mark.parametrize("path", OUR_JS + OUR_CSS + HTML_FILES + [ASSETS / "icon.svg"], ids=lambda p: p.name)
@@ -220,7 +225,8 @@ def test_every_referenced_asset_exists():
 
 def test_no_orphan_modules():
     seen: set[Path] = set()
-    todo = [(ASSETS / "app.js").resolve()]
+    # static-api.js replaces api.js in a static export (easy-ui export), so it is a root too.
+    todo = [(ASSETS / "app.js").resolve(), (ASSETS / "static-api.js").resolve()]
     while todo:
         p = todo.pop()
         if p in seen or p.suffix != ".js" or VENDOR in p.parents:
@@ -343,3 +349,22 @@ def test_js_formats_match_python_reference(tmp_path):
     assert out["months"] == list(formats.MONTHS)
     assert out["unknown_raises"] is True
     assert not out["bad"], f"{len(out['bad'])} mismatches, first: {out['bad'][:5]}"
+
+
+STEP_RUNNER = """
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.argv[2]).href);
+const cases = [["distance", 65000], ["distance", 850], ["distance", 3400], ["duration", 5400], ["pace", 400],
+               ["number", 65000], ["distance", 0], ["distance", 9e9]];
+console.log(JSON.stringify(cases.map(([f, m]) => mod.axisStep(f, m))));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is not installed")
+def test_js_axis_steps_are_round(tmp_path):
+    runner = tmp_path / "steps.mjs"
+    runner.write_text(STEP_RUNNER, encoding="utf-8")
+    proc = subprocess.run([NODE, str(runner), str(ASSETS / "format.js")], capture_output=True, text=True, timeout=60, check=False)
+    assert proc.returncode == 0, proc.stderr
+    # 20 km lines up to 65 km; 250 m below a kilometre; whole km; 30 min; 2 min; numbers left to the chart.
+    assert json.loads(proc.stdout) == [20000, 250, 1000, 1800, 120, None, None, None]

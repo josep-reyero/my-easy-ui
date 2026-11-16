@@ -1,7 +1,7 @@
 """The dashboard data: an immutable copy of the allowlisted tables.
 
 ``easy-ui data build`` copies only the tables and views listed in
-``[ui] tables`` from the app's SQLite file into a new file under the UI
+``[ui] tables`` from the project's SQLite file into a new file under the UI
 state folder (``<state>/data/bundle-<time>-<hash>.sqlite``), makes it
 read-only, writes a small JSON description next to it and then atomically
 switches the ``current`` link to it. Views are copied as plain tables (their
@@ -60,7 +60,7 @@ from typing import Any
 from urllib.parse import quote
 
 from easyui import paths
-from easyui.appconfig import AppConfig
+from easyui.appconfig import AppConfig, write_snapshot
 from easyui.errors import DataBuildError, NoData, NotFound, TemporaryFailure
 
 DEFAULT_KEEP = 3
@@ -119,7 +119,7 @@ def require_current(where: AppConfig | paths.StatePaths) -> Path:
     if p is None:
         raise NoData(
             "There is no dashboard data yet, so the dashboards have nothing to show.",
-            hint="Build it with: easy-ui data build (it copies the tables listed in app.toml for the dashboards).",
+            hint="Build it with: easy-ui data build (it copies the tables listed in project.toml for the dashboards).",
         )
     return p
 
@@ -304,9 +304,9 @@ def _missing_tables_error(missing: list[str], available: list[str]) -> NotFound:
         close = difflib.get_close_matches(t, available, n=1)
         parts.append(f'"{t}"' + (f' (did you mean "{close[0]}"?)' if close else ""))
     return NotFound(
-        f"app.toml lists {', '.join(parts)} under [ui] tables, but the app's data file has no table or view with "
+        f"project.toml lists {', '.join(parts)} under [ui] tables, but the project's data file has no table or view with "
         "that name, so the dashboard data was not built (the previous data stays in use).",
-        hint=f"Tables and views in the data file: {', '.join(available) or '(none)'}. Fix [ui] tables in app.toml, "
+        hint=f"Tables and views in the data file: {', '.join(available) or '(none)'}. Fix [ui] tables in project.toml, "
         "then run: easy-ui data build",
     )
 
@@ -316,11 +316,12 @@ def build(config: AppConfig, *, keep: int = DEFAULT_KEEP, now: _dt.datetime | No
     tables = config.require_tables()
     if not src_path.is_file():
         raise NotFound(
-            f"The app's data file {paths.display_path(src_path)} does not exist yet, so there is nothing to copy "
+            f"The project's data file {paths.display_path(src_path)} does not exist yet, so there is nothing to copy "
             "for the dashboards.",
-            hint="Run the app's job or command that creates its data first, or check [ui] data in app.toml.",
+            hint="Run the project's job or command that creates its data first, or check [ui] data in project.toml.",
         )
     st = config.state.ensure()
+    write_snapshot(config)
     lock_path = st.data / ".build.lock"
     lock = open(lock_path, "a")  # noqa: SIM115 - held for the whole build
     try:
@@ -328,7 +329,7 @@ def build(config: AppConfig, *, keep: int = DEFAULT_KEEP, now: _dt.datetime | No
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise TemporaryFailure(
-                "Another data build for this app is running right now, so this one did not start.",
+                "Another data build for this project is running right now, so this one did not start.",
                 hint="Wait a moment and run easy-ui data build again.",
             ) from None
         return _build_locked(config, src_path, tables, st, keep, now)
@@ -352,7 +353,7 @@ def _build_locked(
             src = _connect_ro(src_path, immutable=False)
         except sqlite3.Error as e:
             raise DataBuildError(
-                f"The app's data file {paths.display_path(src_path)} could not be opened, so the dashboard data "
+                f"The project's data file {paths.display_path(src_path)} could not be opened, so the dashboard data "
                 "was not built (the previous data stays in use).",
                 hint="Check that it is a SQLite file and that this account can read it.",
                 detail=str(e),
@@ -379,9 +380,9 @@ def _build_locked(
             src.execute("COMMIT")
         except sqlite3.Error as e:
             raise DataBuildError(
-                "The dashboard data could not be copied from the app's data file, so nothing was changed (the "
+                "The dashboard data could not be copied from the project's data file, so nothing was changed (the "
                 "previous data stays in use).",
-                hint="Try again; if it keeps failing, check the data file with the app's own commands.",
+                hint="Try again; if it keeps failing, check the data file with the project's own commands.",
                 detail=str(e),
             ) from None
         finally:

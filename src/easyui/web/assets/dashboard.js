@@ -78,6 +78,8 @@ export class DashboardView {
   // ---- params -----------------------------------------------------------
 
   initParams(spec, initial) {
+    // A shared copy (spec.fixed) has the numbers for its own settings only: they cannot be changed.
+    if (spec.fixed) initial = null;
     this.paramDefs = new Map((spec.params || []).map((p) => [p.name, p]));
     const old = this.params || new Map();
     this.params = new Map();
@@ -120,6 +122,7 @@ export class DashboardView {
 
   get ctx() {
     return {
+      fixed: this.spec.fixed === "picture" ? "picture" : Boolean(this.spec.fixed),
       params: this.params,
       paramDefs: this.paramDefs,
       queryHasControls: (q) => {

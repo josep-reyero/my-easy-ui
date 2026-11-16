@@ -403,7 +403,7 @@ def test_serve_with_the_real_server(pv, demo_app):
             r = c.get(url.removeprefix(base))
             assert r.status_code == 303 and "token" not in r.headers["location"]
             listing = c.get("/api/dashboards").json()
-            # in the order of [ui] dashboards in app.toml, not by name
+            # in the order of [ui] dashboards in project.toml, not by name
             assert [d["slug"] for d in listing] == ["overview", "activities"]
             compiled = c.get("/api/dashboards/overview").json()
             assert compiled["title"] == "Overview" and "SELECT" not in json.dumps(compiled)

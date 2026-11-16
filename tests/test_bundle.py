@@ -1,4 +1,4 @@
-"""Data bundles (build, current link, pruning, rev), app.toml reading and folders."""
+"""Data bundles (build, current link, pruning, rev), project.toml reading and folders."""
 
 from __future__ import annotations
 
@@ -114,7 +114,7 @@ def test_prune_never_removes_current(built_app):
 
 def test_missing_table_is_reported_with_closest_match(demo_app):
     toml = DEMO_APP_TOML.format(name="demo").replace('"weekly"]', '"weekley", "privat_notes"]')
-    (demo_app.app_dir / "app.toml").write_text(toml)
+    (demo_app.app_dir / "project.toml").write_text(toml)
     with pytest.raises(NotFound) as e:
         demo_app.build()
     assert 'did you mean "weekly"' in e.value.message
@@ -222,11 +222,11 @@ def test_describe_tables_samples(built_app):
     json.dumps(tables)
 
 
-# ---------------------------------------------------------------- app.toml
+# ---------------------------------------------------------------- project.toml
 
 
 def write_toml(tmp_path, text):
-    (tmp_path / "app.toml").write_text(text)
+    (tmp_path / "project.toml").write_text(text)
     return tmp_path
 
 
@@ -244,14 +244,14 @@ def test_appconfig_reads_app_and_ui(demo_app):
 def test_appconfig_found_from_a_subfolder(demo_app, monkeypatch):
     monkeypatch.chdir(demo_app.app_dir / "ui" / "dashboards")
     assert appconfig.load().app_dir == demo_app.app_dir.resolve()
-    assert appconfig.load(demo_app.app_dir / "app.toml").name == "demo"
+    assert appconfig.load(demo_app.app_dir / "project.toml").name == "demo"
 
 
 def test_appconfig_missing(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     with pytest.raises(NotFound) as e:
         appconfig.load()
-    assert "--app-dir" in e.value.hint
+    assert "--project-dir" in e.value.hint
     with pytest.raises(NotFound):
         appconfig.load(tmp_path)
 
@@ -272,7 +272,7 @@ def test_appconfig_missing(tmp_path, monkeypatch):
     ],
 )
 def test_appconfig_ui_errors(tmp_path, ui, words):
-    write_toml(tmp_path, f'[app]\nname = "demo"\n\n[ui]\n{ui}\n')
+    write_toml(tmp_path, f'[project]\nname = "demo"\n\n[ui]\n{ui}\n')
     with pytest.raises(ConfigError) as e:
         appconfig.load(tmp_path)
     assert words in e.value.message + (e.value.hint or "")
@@ -281,9 +281,9 @@ def test_appconfig_ui_errors(tmp_path, ui, words):
 @pytest.mark.parametrize(
     "text, words",
     [
-        ("[ui]\n", "no [app]"),
-        ('[app]\nname = "Bad Name"\n', "not valid"),
-        ('[app]\nname = "demo"\ntitle = ""\n', "short piece of text"),
+        ("[ui]\n", "no [project]"),
+        ('[project]\nname = "Bad Name"\n', "not valid"),
+        ('[project]\nname = "demo"\ntitle = ""\n', "short piece of text"),
         ('[app\nname = "demo"', "typing mistake on line 1"),
     ],
 )
@@ -295,7 +295,7 @@ def test_appconfig_app_errors(tmp_path, text, words):
 
 
 def test_appconfig_ignores_other_tables_and_needs_ui_for_data(tmp_path):
-    write_toml(tmp_path, '[app]\nname = "demo"\nversion = "1"\nfuture = 1\n\n[jobs.x]\nrun = "x"\n')
+    write_toml(tmp_path, '[project]\nname = "demo"\nversion = "1"\nfuture = 1\n\n[jobs.x]\nrun = "x"\n')
     cfg = appconfig.load(tmp_path)
     assert cfg.title == "demo" and cfg.data is None and cfg.tables == ()
     with pytest.raises(ConfigError) as e:
@@ -320,11 +320,14 @@ def test_paths_env_overrides(tmp_path, monkeypatch):
 
 
 def test_paths_defaults(monkeypatch, tmp_path):
-    for k in ("MES_DATA_HOME", "EASYUI_STATE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"):
+    for k in ("MES_DATA_HOME", "EASYUI_STATE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "MES_STATE_HOME", "MES_CONFIG"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     assert paths.data_home() == tmp_path / ".local/share/mes"
-    assert paths.state_home() == tmp_path / ".local/state/easy-ui"
+    assert paths.state_home() == tmp_path / ".local/state/mes"
+    assert paths.app_data_dir("demo") == tmp_path / ".local/share/mes/demo"
+    assert paths.ui_dir("demo") == tmp_path / ".local/state/mes/demo/ui"
+    assert paths.config_path() == tmp_path / ".config/mes/config.toml"
 
 
 @pytest.mark.parametrize("name", ["../x", "a/b", "", "X", "a", "-a"])
