@@ -1,6 +1,6 @@
 # my-easy-ui
 
-A small dashboard server and browser renderer for projects built with my-easy-software. One
+A small dashboard server and browser renderer for projects built with [my-easy-software](https://github.com/josep-reyero/my-easy-software). One
 server process serves one project.
 
 ## The idea
@@ -45,7 +45,7 @@ below with the demo's own folders.
 
 ## Quick start
 
-In a project folder (the one holding `project.toml`, shared with my-easy-software):
+In a project folder (the one holding `project.toml`, shared with [my-easy-software](https://github.com/josep-reyero/my-easy-software)):
 
 ```toml
 # project.toml
@@ -62,7 +62,7 @@ refresh_after = ["sync"]         # optional, read by mes: jobs after which it ru
 ```
 
 easy-ui reads only `[project]` and `[ui]`; the other tables (`[apps]`, `[jobs]`, `[storage]`)
-belong to my-easy-software. An old `app.toml` gets a message saying how to rename it.
+belong to [my-easy-software](https://github.com/josep-reyero/my-easy-software). An old `app.toml` gets a message saying how to rename it.
 
 ```sh
 easy-ui data build        # copy the allowed tables for the dashboards
@@ -185,12 +185,12 @@ On your own computer:
 - Sample data for the preview: `ui/fixtures/*.sqlite`, `*.sqlite3` or `*.db` in the project
   (made-up data only), used when the project has no data yet or with `easy-ui preview --fixture`.
 
-On a server (`MES_ROOT=/var/lib/mes`, set by my-easy-software for its jobs):
+On a server (`MES_ROOT=/var/lib/mes`, set by [my-easy-software](https://github.com/josep-reyero/my-easy-software) for its jobs):
 
 | Folder | Owner : group | Mode | Why |
 | --- | --- | --- | --- |
 | `/var/lib/mes/<p>` | `root` : `root` | 0711 | only root may add, rename or replace what is in it |
-| `/var/lib/mes/<p>/data` | (my-easy-software) | | the project's own data; the web account cannot enter |
+| `/var/lib/mes/<p>/data` | ([my-easy-software](https://github.com/josep-reyero/my-easy-software)) | | the project's own data; the web account cannot enter |
 | `/var/lib/mes/<p>/ui`, `ui/data`, `ui/specs` | `mes-<p>` : `mes-<p>-web` | 2750 | written by the jobs (`data build`, `publish`), read by the web account |
 | `/var/lib/mes/<p>/auth` | `mes-<p>-web` : `mes-<p>-web` | 0700 | the sign-in, written only by the web account; beside `ui/`, never inside it |
 
@@ -225,6 +225,15 @@ uv run pytest
 Python 3.12 or newer. Runtime dependencies: starlette, uvicorn, argon2-cffi, PyYAML and
 cryptography (passkey signatures and locked exports). The passkey checks are written here (no
 WebAuthn library) and tested against a recorded browser ceremony.
+
+
+## Related projects
+
+This is one piece of a small family of projects that work together or on their own:
+
+- [my-easy-software](https://github.com/josep-reyero/my-easy-software): the framework: create, run, deploy and share small personal projects with the `mes` command.
+- [my-bucket-storage](https://github.com/josep-reyero/my-bucket-storage): storage: a small object store with no server process that takes little disk space.
+- [fitdata-garmin](https://github.com/josep-reyero/fitdata-garmin): the first project built this way: a personal Garmin data archive with a command line for agents.
 
 ## License
 
