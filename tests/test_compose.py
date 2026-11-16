@@ -110,14 +110,14 @@ def test_step_5_compose(fitlab):
     ]
     assert data["warnings"] == []
     # Composed overview: the controls and stats row, the walks section's row (at the anchor), the recent-activities
-    # table, the rides section's row (at the end).
+    # table with the chart of both apps' distances, the rides section's row (at the end).
     d = compose.compose(cfg_of(fitlab)).get("overview").dashboard
     assert [[c["title"] or c["type"] for c in row] for row in d.layout] == [
-        ["controls", "Activities", "Distance (km)"], ["Walking per week"], ["Recent activities"],
-        ["Riding per week", "Days"]]
-    assert [c["app"] for row in d.layout for c in row] == [None, None, None, "fitlab-walks", None, "fitlab-rides",
-                                                           "fitlab-rides"]
-    assert list(d.queries) == ["totals", "recent", "walks_per_week", "rides_per_week", "rides_days"]
+        ["controls", "Activities", "Distance (km)"], ["Walking per week"],
+        ["Recent activities", "Distance per week, every app"], ["Riding per week", "Days"]]
+    assert [c["app"] for row in d.layout for c in row] == [None, None, None, "fitlab-walks", None, None,
+                                                           "fitlab-rides", "fitlab-rides"]
+    assert list(d.queries) == ["totals", "recent", "per_week", "walks_per_week", "rides_per_week", "rides_days"]
     walks = compose.compose(cfg_of(fitlab)).get("walks")
     assert walks.dashboard.app == "fitlab-walks" and spec.compile_dashboard(walks.dashboard)["app"] == "fitlab-walks"
 

@@ -25,6 +25,15 @@ queries:
       WHERE date > date((SELECT max(date) FROM activities), '-' || :days || ' days')
       ORDER BY date DESC
       LIMIT 20
+  per_week:
+    sql: |
+      SELECT strftime('%Y-%W', date) AS week,
+             round(coalesce(sum(CASE WHEN type = 'walking' THEN distance_m END), 0) / 1000.0, 1) AS "Walking km",
+             round(coalesce(sum(CASE WHEN type = 'cycling' THEN distance_m END), 0) / 1000.0, 1) AS "Cycling km"
+      FROM activities
+      WHERE date > date((SELECT max(date) FROM activities), '-' || :days || ' days')
+      GROUP BY 1
+      ORDER BY 1
 
 layout:
   - - type: controls
@@ -47,3 +56,10 @@ layout:
         - {column: type, label: Type}
         - {column: source, label: App}
         - {column: km, label: km, format: decimal1}
+    - type: bar
+      title: Distance per week, every app
+      query: per_week
+      x: week
+      y: [Walking km, Cycling km]
+      stacked: true
+      format: decimal1
