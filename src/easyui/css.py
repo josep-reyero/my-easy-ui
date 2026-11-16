@@ -433,7 +433,7 @@ class _Checker:
     def check_url(self, tok: Token, value: str, *, kind: str) -> str | None:
         target, why = resolve_ref(value, "styles")
         if why:
-            self.err(tok.line, f"This {kind} is refused: {why}",
+            self.err(tok.line, f"This {kind} is refused. {why}",
                      "Put the file in ui/assets/ (pictures and fonts) and refer to it relatively, for example "
                      'url("../assets/logo.svg").' if kind != "@import" else
                      'Import another stylesheet of ui/styles/ by its name, for example @import "base.css";')

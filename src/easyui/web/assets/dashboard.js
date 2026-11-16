@@ -112,31 +112,49 @@ export class DashboardView {
 
   // ---- the look -----------------------------------------------------------
 
-  /** Load easy-ui's stylesheet and the given project stylesheets into the dashboard's tree. */
+  /**
+   * Load easy-ui's stylesheet and the given project stylesheets into the dashboard's tree. easy-ui's own stays
+   * in place; new project stylesheets are added after it and the old ones are taken away only once the new ones
+   * have loaded, so the dashboard never shows without styles in between.
+   */
   setStylesheets(urls) {
-    const wanted = [builtinStylesheet(), ...(Array.isArray(urls) ? urls : [])];
+    const wanted = Array.isArray(urls) ? urls : [];
     const key = wanted.join("\n");
     if (key === this.sheetsKey) return this.ready;
     this.sheetsKey = key;
-    this.host.style.setProperty("visibility", "hidden");
-    const links = wanted.map((url) => {
-      const sheet = document.createElement("link");
-      sheet.rel = "stylesheet";
-      sheet.href = url;
+    const old = Array.from(this.sheets.querySelectorAll("link[data-project]"));
+    const links = [];
+    if (!this.builtin) {
+      this.builtin = this.makeSheet(builtinStylesheet());
+      links.push(this.builtin);
+      this.host.style.setProperty("visibility", "hidden"); // only before the very first styles
+    }
+    const added = wanted.map((url) => {
+      const sheet = this.makeSheet(url);
+      sheet.dataset.project = "";
       return sheet;
     });
+    links.push(...added);
     const loaded = links.map((sheet) => new Promise((resolve) => {
       sheet.addEventListener("load", resolve, { once: true });
       sheet.addEventListener("error", resolve, { once: true });
     }));
     const waited = new Promise((resolve) => { setTimeout(resolve, STYLE_WAIT_MS); });
-    fill(this.sheets, links);
+    this.sheets.append(...links);
     this.ready = Promise.race([Promise.all(loaded), waited]).then(() => {
       if (this.sheetsKey !== key) return;
+      for (const sheet of old) sheet.remove();
       this.host.style.removeProperty("visibility");
       this.restyle();
     });
     return this.ready;
+  }
+
+  makeSheet(url) {
+    const sheet = document.createElement("link");
+    sheet.rel = "stylesheet";
+    sheet.href = url;
+    return sheet;
   }
 
   themeChanged() {

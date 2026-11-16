@@ -142,8 +142,8 @@ def choose_data(cfg: AppConfig, *, fixture: bool = False) -> tuple[Path, str]:
 # ---------------------------------------------------------------- problems as a page
 
 
-def _problem_line(p: dict[str, Any]) -> str:
-    where = []
+def _problem_line(p: dict[str, Any], *, with_file: bool = False) -> str:
+    where = [str(p["file"])] if with_file and p.get("file") else []
     if p.get("line"):
         where.append(f"line {p['line']}")
     if p.get("place") or p.get("where"):
@@ -174,12 +174,12 @@ def problem_page(slug: str, title: str | None, file: str | None, errors: list[di
             "Fix the file and save it: this page reloads by itself."))],
     }]
     if errors:
-        blocks.append({"t": "ul", "items": [[_t(_problem_line(p))] for p in errors[:50]]})
+        blocks.append({"t": "ul", "items": [[_t(_problem_line(p, with_file=file is None))] for p in errors[:50]]})
         if len(errors) > 50:
             blocks.append({"t": "p", "c": [_t(f"... and {len(errors) - 50} more. Run easy-ui validate to see all.")]})
     if warnings:
         blocks.append({"t": "h", "level": 3, "c": [_t("Also worth a look (warnings)")]})
-        blocks.append({"t": "ul", "items": [[_t(_problem_line(p))] for p in warnings[:20]]})
+        blocks.append({"t": "ul", "items": [[_t(_problem_line(p, with_file=file is None))] for p in warnings[:20]]})
     return {
         "spec": spec.SPEC_VERSION,
         "slug": slug,

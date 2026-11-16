@@ -364,6 +364,7 @@ export class Chart extends Frame {
 
   /** The page's styles changed (a stylesheet loaded, the theme changed): read the look again. */
   restyle() {
+    if (this.chart) this.chart.resize();
     this.redraw();
   }
 

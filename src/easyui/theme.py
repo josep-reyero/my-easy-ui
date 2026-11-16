@@ -375,7 +375,7 @@ def _font_files(ctx: Any, path: tuple, raw: Any, assets: set[str]) -> Any:
             f = item["file"]
             target, why = css.resolve_ref(f, "assets") if isinstance(f, str) else (None, "It is not text.")
             if why or target is None:
-                ctx.err(ip + ("file",), f"The font file is refused: {why}",
+                ctx.err(ip + ("file",), f"The font file is refused. {why}",
                         hint="Name a .woff2 file inside ui/assets/, relative to that folder, for example fonts/a.woff2.")
                 continue
             rel = target[len("assets/"):]

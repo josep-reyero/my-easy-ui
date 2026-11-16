@@ -1798,8 +1798,9 @@ input[type="date"].input {
   position: relative;
   isolation: isolate;
   contain: paint;
-  margin: -12px -14px 0;
-  padding: 12px 14px 0;
+  /* a little room at the sides for focus rings and hover backgrounds that reach past the edge */
+  margin: 0 -14px;
+  padding: 0 14px;
 }
 
 .eui-host {
