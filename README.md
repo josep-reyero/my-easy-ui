@@ -1,5 +1,11 @@
 # my-easy-ui
 
+> **Rework in progress.** Two changes are being built right now and are not finished: fully
+> flexible styles (a theme file plus real CSS, [design](docs/STYLES-DESIGN.md)); and apps as proper
+> packages that contribute dashboards and panels to a project
+> ([design](https://github.com/josep-reyero/my-easy-software/blob/main/docs/apps.md)). Until this
+> note is removed, expect file formats and some commands to change.
+
 A small dashboard server and browser renderer for projects built with [my-easy-software](https://github.com/josep-reyero/my-easy-software). One
 server process serves one project.
 
@@ -18,17 +24,24 @@ allowed, the closest match), and the server re-checks everything before it shows
 ## How it keeps your data safe
 
 - Dashboards never touch the project's own database. `easy-ui data build` copies only the tables
-  listed in `project.toml` into a read-only file, and dashboards read that copy.
+  listed in `project.toml` into a read-only file, and dashboards read that copy. The copy itself
+  treats the project's file as untrusted: it only reads, only the listed tables and views, with a
+  time and size limit, and never runs SQL stored in the file (indexes are made again from their
+  column lists). When the list of tables grows, `data build` and `publish` say so.
 - The server only runs queries that are written in a published dashboard. The browser sends a
   query's name and the control values, never SQL.
 - Queries run in a sandbox: read-only and immutable file, one `SELECT` only, no `ATTACH`, no
   `PRAGMA`, no writes, no extension or file functions, values always bound as parameters, a time
-  limit, a row limit and a size limit.
+  limit, a row limit and a size limit, and small limits on one value (200 KB), on memory (64 MB)
+  and on how complex a query may be. Each query runs in a separate worker process that is killed
+  when its time is up, so no query can keep running past its limit; a busy server answers "try
+  again in a few seconds" instead of queueing. Workers start when needed and stop when idle.
 - Sign-in is always required, and the server listens only on this machine. Sign in with a
   passkey (Face ID, Touch ID, Windows Hello, a phone or a security key); the password stays as a
   fallback and can be switched off, and one-time recovery codes cover a lost device.
-- A shared copy (`easy-ui export`) holds only the chosen dashboards' numbers for one set of
-  control values: no SQL, no tables, nothing of the sign-in.
+- A shared copy (`easy-ui export`) holds only what the chosen dashboards show for one set of
+  control values (only the columns and rows the components show): no SQL, no tables, nothing of
+  the sign-in. The command lists exactly what is in it.
 
 ## Try the demo
 
@@ -66,7 +79,7 @@ belong to [my-easy-software](https://github.com/josep-reyero/my-easy-software). 
 
 ```sh
 easy-ui data build        # copy the allowed tables for the dashboards
-easy-ui tables            # see the tables and columns, with sample values
+easy-ui tables            # see the tables and columns, with sample values (--source: the project's file)
 easy-ui components        # the whole vocabulary (add --json for agents)
 # write ui/dashboards/overview.yaml (see docs/SPEC.md)
 easy-ui validate          # check every dashboard against the data
@@ -101,15 +114,24 @@ or takes a picture with `easy-ui screenshot`. Automated tests set a made-up pass
 library function `easyui.auth.set_password(state.auth, "...")`.
 
 **Sharing a copy.** `easy-ui export --out DIR` writes a self-contained folder (`index.html`
-and its files) with the published dashboards and their numbers for one set of control values
-(`--set NAME=VALUE`, `--dashboard NAME`). It needs no server and makes no network request, so
-it can be opened from the disk or put on any static host. The command lists exactly what
-becomes visible. With `--encrypt` the data is locked with AES-256-GCM and the key exists only
-in the link's ending (`#k=...`), which browsers never send to the host:
+and its files) with the published dashboards and the numbers they show for one set of control
+values (`--set NAME=VALUE`, `--dashboard NAME`); `--single-file --out FILE.html` writes one HTML
+file instead, to open from the disk or send directly. It needs no server and makes no network
+request, so it can be opened from the disk or put on any static host (it asks search engines
+not to index it). The command lists exactly what becomes visible, and nothing else is in it.
+With `--encrypt` the data is locked with AES-256-GCM and the key exists only in the link's
+ending (`#k=...`), which browsers never send to the host:
 
 ```sh
 easy-ui export --out ./share --dashboard overview --set since=2026-01-01 --encrypt
 ```
+
+What the lock protects against, plainly: someone who finds or copies the files without the
+link (a disk, a backup, a listing on the host). It does **not** protect against whoever serves
+the files: a host could change the page so that it sends the key away the next time someone
+opens the link. Put a locked copy only on a host you trust, or send the single file directly.
+The page keeps the key only while it is open (never in the browser's storage) and takes it out
+of the address bar, but the browser's history may still keep the whole link.
 
 **Pictures for agents.** `easy-ui screenshot [DASHBOARD] --out FILE.png [--phone] [--dark]`
 draws the working dashboards (or `--published`) in a headless Chromium-based browser already
@@ -215,10 +237,34 @@ wrong passwords (passkeys and recovery codes are not affected); passkeys need `l
 HTTPS and work only on the configured web addresses; a shared copy shows one set of control values. Tested with Chromium; not yet with Safari
 or Firefox; the systemd files are checked by tests, not yet on a real server.
 
+## Installing
+
+Install from a copy of this repository with the exact versions it was tested with
+(`uv.lock` pins every dependency and its hash):
+
+```sh
+uv sync --locked --no-dev        # in the repository folder; fails instead of changing the lock
+uv run --locked easy-ui --help
+```
+
+For a command on the path (on a server: outside `/var/lib/mes` and outside home folders), make a
+virtual environment and install the locked versions into it, each checked against its hash:
+
+```sh
+uv export --locked --no-dev --no-emit-project --format requirements-txt > /tmp/easy-ui-requirements.txt
+uv venv /opt/easy-ui
+uv pip install --python /opt/easy-ui --require-hashes -r /tmp/easy-ui-requirements.txt
+uv pip install --python /opt/easy-ui --no-deps .
+ln -s /opt/easy-ui/bin/easy-ui /usr/local/bin/easy-ui
+```
+
+ `easy-ui serve`, `preview` and `export` check the chart library's file against
+the hash it was shipped with before they start, and the page asks the browser to check it too.
+
 ## Development
 
 ```sh
-uv sync
+uv sync --locked
 uv run pytest
 ```
 
