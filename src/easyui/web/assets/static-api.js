@@ -155,6 +155,11 @@ export const api = {
   async rev() {
     return { rev: "export" };
   },
+  async styles() {
+    const p = await load();
+    const st = p.styles && typeof p.styles === "object" ? p.styles : { rev: "none", theme_css: false, stylesheets: [] };
+    return { ...st, static: true };
+  },
   async logout() {
     return { signed_in: false };
   },

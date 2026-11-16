@@ -1,0 +1,44 @@
+# easy-ui ready-made theme. Copy it with: easy-ui theme use instrument
+name: Instrument
+description: A lab instrument panel. Cold greys, a teal signal, monospaced figures, hairline panels, tight spacing.
+
+colors:
+  accent: "#0a6c80"
+  background: "#e8ebee"
+  surface: "#fbfcfd"
+  text: "#0f1720"
+  muted: "#4f5b67"
+  border: "#c9d0d7"
+  grid: "#e1e5e9"
+  good: "#13795b"
+  bad: "#b3261e"
+  chart: ["#0a6c80", "#c4561a", "#5b4bb5", "#3f8f2f", "#b03a6b"]
+
+dark:
+  accent: "#3fc1d6"
+  background: "#0e1316"
+  surface: "#151c21"
+  text: "#e6edf2"
+  muted: "#93a1ad"
+  border: "#2a3640"
+  grid: "#1f2830"
+  good: "#4fd1a1"
+  bad: "#ff8a7a"
+  chart: ["#3fc1d6", "#ff9d4d", "#a99bff", "#7fd36a", "#f07fb0"]
+
+fonts:
+  body: grotesque
+  headings: grotesque
+  numbers: mono
+
+type:
+  size: 15
+  scale: 1.2
+radius: 2
+density: compact
+cards: outline
+chart:
+  line_width: 1.5
+  grid: dashed
+  area_opacity: 0.12
+  bar_radius: 0

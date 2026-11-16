@@ -190,7 +190,9 @@ def test_links_only_https():
     for path in OUR_JS:
         for line in path.read_text(encoding="utf-8").splitlines():
             if re.search(r"\.href\s*=", line):
-                assert any(ok in line for ok in ("a.href = url", "a.href = hash", 'skip.href = "#main"')), f"{path.name}: {line.strip()}"
+                # sheet.href: the project's stylesheets, same-origin addresses built by look.js (ui/...).
+                assert any(ok in line for ok in ("a.href = url", "a.href = hash", 'skip.href = "#main"',
+                                                 "sheet.href = url", "sheet.href = want")), f"{path.name}: {line.strip()}"
 
 
 # ---- references -----------------------------------------------------------------

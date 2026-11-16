@@ -66,10 +66,14 @@ _PLAYWRIGHT = (
     "~/.cache/ms-playwright/chromium_headless_shell-*/chrome-headless-shell-*/chrome-headless-shell",
     "~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome",
 )
-# Ready when the dashboard says every query has answered (body[data-loaded]) and nothing is still loading, or
-# when the page shows a message or the list instead of a dashboard.
+# Ready when the dashboard says every query has answered and its stylesheets are in (body[data-loaded]), nothing
+# is still loading (also inside the dashboard's own tree), the fonts have loaded, or when the page shows a
+# message or the list instead of a dashboard.
 _READY = """(() => {
-  if (document.querySelector('.page-loading, .boot, .sk-wrap, .c.is-updating')) return false;
+  const trees = [document];
+  for (const host of document.querySelectorAll('.eui-host')) if (host.shadowRoot) trees.push(host.shadowRoot);
+  for (const t of trees) if (t.querySelector('.page-loading, .boot, .sk-wrap, .c.is-updating')) return false;
+  if (document.fonts && document.fonts.status !== 'loaded') return false;
   if (document.body.dataset.loaded) return true;
   return Boolean(document.querySelector('.page-message, .home'));
 })()"""

@@ -69,7 +69,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from easyui import bundle, paths, publish, sandbox, spec
+from easyui import bundle, paths, publish, sandbox, spec, styles
 from easyui.appconfig import AppConfig
 from easyui.errors import ConfigError, EasyUIError, NotAvailable, NotFound, SpecError, UsageError
 
@@ -210,6 +210,9 @@ class WorkingSource:
         self._file_problems: list[dict[str, Any]] = []
         self._notes: list[str] = []
         self._data_problem: dict[str, Any] | None = None
+        self._styles: styles.StyleSet = styles.EMPTY
+        self._style_problems: list[dict[str, Any]] = []
+        self._style_warnings: list[dict[str, Any]] = []
         self._rev = ""
 
     # -- watching
@@ -233,6 +236,7 @@ class WorkingSource:
                     h.update(f"{e.name}\0{s.st_size}\0{s.st_mtime_ns}\0{s.st_ino}\0{s.st_mode}\n".encode())
         except OSError:
             h.update(b"no-folder")
+        _stat_tree(h, self.cfg.app_dir / "ui", ("theme.yaml", "theme.yml", "styles", "assets"), depth=0)
         h.update(bundle.data_rev(self.cfg).encode())
         return h.hexdigest()
 
@@ -275,6 +279,14 @@ class WorkingSource:
         self._entries = {r["slug"]: r for r in results}
         self._file_problems = problems
         self._notes = notes
+        checked = styles.check(styles.read_style_dir(self.cfg.app_dir / "ui"))
+        self._styles = checked.styles if checked.styles is not None else styles.EMPTY
+        self._style_problems = checked.errors
+        self._style_warnings = checked.warnings
+        self._notes = notes + checked.notes
+        for p in checked.errors[:5]:
+            self.log(f"{p['file']}" + (f":{p['line']}" if p.get("line") else "") + f": {p['problem']} The look "
+                     "(theme, stylesheets and assets) is left out until this is fixed.")
         bad = [r for r in results if not r["ok"]]
         for r in bad:
             first = r["errors"][0] if r["errors"] else {"problem": "it could not be read"}
@@ -293,7 +305,7 @@ class WorkingSource:
         return self._rev
 
     def _needs_problem_page(self) -> bool:
-        return bool(self._file_problems or self._data_problem or not self._entries)
+        return bool(self._file_problems or self._data_problem or self._style_problems or not self._entries)
 
     def list(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -309,13 +321,17 @@ class WorkingSource:
             return out
 
     def _problems_page(self) -> dict[str, Any]:
-        problems = list(self._file_problems) + ([self._data_problem] if self._data_problem else [])
+        problems = list(self._file_problems) + list(self._style_problems) + (
+            [self._data_problem] if self._data_problem else [])
         if not self._entries and not problems:
             intro = ("There are no dashboards yet in ui/dashboards/. Create one, for example ui/dashboards/overview.yaml "
                      "(see: easy-ui components); it appears here as soon as you save it.")
             return problem_page(PROBLEMS_SLUG, "No dashboards yet", None, [], [], intro=intro)
         intro = "Some files in ui/dashboards/ or the data could not be used. Fix them and this page reloads by itself."
-        return problem_page(PROBLEMS_SLUG, "Needs fixing", None, problems, [], intro=intro)
+        if self._style_problems:
+            intro = ("Some files could not be used. While the theme, ui/styles/ or ui/assets/ have mistakes, the "
+                     "dashboards are shown with easy-ui's own look. Fix them and this page reloads by itself.")
+        return problem_page(PROBLEMS_SLUG, "Needs fixing", None, problems, self._style_warnings[:20], intro=intro)
 
     def compiled(self, slug: str, *, today: _dt.date | None = None) -> dict[str, Any]:
         with self._lock:
@@ -345,15 +361,42 @@ class WorkingSource:
     def bundle_path(self) -> Path:
         return bundle.require_current(self.cfg)
 
+    def styles(self) -> styles.StyleSet:
+        with self._lock:
+            self._ready()
+            return self._styles
+
     def status(self) -> dict[str, Any]:
         with self._lock:
             self._ready()
             return {
                 "rev": self._rev,
                 "dashboards": [{k: v for k, v in r.items() if k != "dashboard"} for r in self._entries.values()],
-                "problems": list(self._file_problems) + ([self._data_problem] if self._data_problem else []),
+                "problems": list(self._file_problems) + list(self._style_problems)
+                + ([self._data_problem] if self._data_problem else []),
+                "style_warnings": list(self._style_warnings),
                 "notes": list(self._notes),
             }
+
+
+def _stat_tree(h: Any, folder: Path, names: tuple[str, ...] | None, depth: int) -> None:
+    """Add the names, sizes and times of the style files under ``folder`` to ``h`` (no links followed)."""
+    try:
+        with os.scandir(folder) as it:
+            entries = sorted(it, key=lambda e: e.name)
+    except OSError:
+        h.update(f"no:{folder.name}".encode())
+        return
+    for e in entries:
+        if names is not None and e.name not in names:
+            continue
+        try:
+            st = e.stat(follow_symlinks=False)
+        except OSError:
+            continue
+        h.update(f"{depth}\0{e.name}\0{st.st_size}\0{st.st_mtime_ns}\0{st.st_ino}\0{st.st_mode}\n".encode())
+        if stat.S_ISDIR(st.st_mode) and depth < 4:
+            _stat_tree(h, Path(e.path), None, depth + 1)
 
 
 # ---------------------------------------------------------------- starting

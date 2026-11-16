@@ -2,11 +2,20 @@
 // param values (mirrored in the address so a reload or bookmark keeps them),
 // and runs each query through POST /api/query when the page opens, when a
 // control changes, and when the data changes.
+//
+// The dashboard is drawn in its own document tree (a shadow root inside
+// .eui-frame) that loads easy-ui's stylesheet and, for a real dashboard, the
+// project's stylesheets. Nothing outside that tree (the top bar, the preview
+// badge, sign-in, settings) can be reached by them, and easy-ui's own pages
+// that list problems are drawn there with easy-ui's stylesheet only. The tree
+// stays hidden until its stylesheets have loaded, so nothing flashes unstyled.
 
 import { h, fill } from "./dom.js";
 import { api, describe } from "./api.js";
-import { Stat, Table, TextBlock, Controls } from "./components.js";
+import { Stat, Table, TextBlock, Controls, componentProps } from "./components.js";
 import { Chart } from "./charts.js";
+import { applyOverrides, isDark, onThemeChange } from "./theme.js";
+import { builtinStylesheet } from "./look.js";
 
 const BASIS = { stat: 9.5, line: 20, area: 20, bar: 20, table: 24, text: 18 }; // rem
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -43,7 +52,7 @@ function coerce(def, raw) {
 
 class Unknown {
   constructor(comp) {
-    this.el = h("section", { class: "c c-unknown" },
+    this.el = h("section", componentProps({ ...comp, type: "unknown" }),
       h("div", { class: "state" }, [
         h("p", { class: "state-title", text: "This part of the page cannot be shown." }),
         h("p", { class: "state-hint", text: `It is a “${String(comp.type)}”, which this version of the dashboard page does not know. Updating easy-ui may fix it.` }),
@@ -53,8 +62,14 @@ class Unknown {
   destroy() {}
 }
 
+const STYLE_WAIT_MS = 4000; // a stylesheet that never answers does not keep the dashboard hidden
+
 export class DashboardView {
-  constructor({ spec, initial, onLoaded }) {
+  /**
+   * {spec, initial, onLoaded(outcome), project, stylesheets}: stylesheets are the addresses of the project's
+   * stylesheets (left out for easy-ui's own pages that list problems).
+   */
+  constructor({ spec, initial, onLoaded, project = "", stylesheets = [] }) {
     this.onLoaded = onLoaded || (() => {});
     this.seq = 0;
     this.latest = new Map();
@@ -62,17 +77,81 @@ export class DashboardView {
     this.parts = [];
     this.consumers = new Map(); // query -> [component]
     this.controls = [];
-    this.status = h("p", { class: "dash-status", attrs: { role: "status" } });
+    this.status = h("p", { class: "dash-status eui-status", attrs: { role: "status" } });
     this.banner = h("div", { class: "banner", attrs: { role: "alert" }, hidden: true });
     this.rowsEl = h("div", { class: "rows" });
-    this.titleEl = h("h1", { class: "dash-title" });
-    this.descEl = h("p", { class: "dash-desc" });
-    this.el = h("article", { class: "dash" }, [
+    this.titleEl = h("h1", { class: "dash-title eui-dashboard-title" });
+    this.descEl = h("p", { class: "dash-desc eui-dashboard-description" });
+    this.article = h("article", { class: "dash eui-dashboard" }, [
       h("header", { class: "dash-head" }, [h("div", { class: "dash-heading" }, [this.titleEl, this.descEl]), this.status]),
       this.banner,
       this.rowsEl,
     ]);
+    // The dashboard's own document tree, inside a frame that keeps it in its box.
+    this.appEl = h("div", { class: "eui-app", dataset: { project: String(project || ""), theme: isDark() ? "dark" : "light" } }, this.article);
+    this.host = h("div", { class: "eui-host" });
+    this.el = h("div", { class: "eui-frame" }, this.host);
+    this.shadow = this.host.attachShadow({ mode: "open" });
+    this.sheets = h("div", { class: "eui-sheets", hidden: true });
+    this.shadow.append(this.sheets, this.appEl);
+    this.unsubscribeTheme = onThemeChange(() => this.themeChanged());
+    this.projectSheets = Array.isArray(stylesheets) ? stylesheets : [];
     this.build(spec, initial);
+  }
+
+  /** easy-ui's own page listing problems: never drawn with the project's styles. */
+  get isProblemPage() {
+    return Boolean(this.spec && this.spec.problems);
+  }
+
+  /** The project's stylesheets changed (a new version, or a saved change in the preview). */
+  setLook(stylesheets) {
+    this.projectSheets = Array.isArray(stylesheets) ? stylesheets : [];
+    return this.setStylesheets(this.isProblemPage ? [] : this.projectSheets);
+  }
+
+  // ---- the look -----------------------------------------------------------
+
+  /** Load easy-ui's stylesheet and the given project stylesheets into the dashboard's tree. */
+  setStylesheets(urls) {
+    const wanted = [builtinStylesheet(), ...(Array.isArray(urls) ? urls : [])];
+    const key = wanted.join("\n");
+    if (key === this.sheetsKey) return this.ready;
+    this.sheetsKey = key;
+    this.host.style.setProperty("visibility", "hidden");
+    const links = wanted.map((url) => {
+      const sheet = document.createElement("link");
+      sheet.rel = "stylesheet";
+      sheet.href = url;
+      return sheet;
+    });
+    const loaded = links.map((sheet) => new Promise((resolve) => {
+      sheet.addEventListener("load", resolve, { once: true });
+      sheet.addEventListener("error", resolve, { once: true });
+    }));
+    const waited = new Promise((resolve) => { setTimeout(resolve, STYLE_WAIT_MS); });
+    fill(this.sheets, links);
+    this.ready = Promise.race([Promise.all(loaded), waited]).then(() => {
+      if (this.sheetsKey !== key) return;
+      this.host.style.removeProperty("visibility");
+      this.restyle();
+    });
+    return this.ready;
+  }
+
+  themeChanged() {
+    this.appEl.dataset.theme = isDark() ? "dark" : "light";
+    applyOverrides(this.article, this.spec && this.spec.theme);
+    this.restyle();
+  }
+
+  restyle() {
+    for (const part of this.parts) if (typeof part.restyle === "function") part.restyle();
+  }
+
+  /** Tell the page a load ended, once the dashboard's stylesheets are in (pictures wait for both). */
+  loaded(outcome) {
+    Promise.resolve(this.ready).then(() => this.onLoaded(outcome));
   }
 
   // ---- params -----------------------------------------------------------
@@ -177,22 +256,28 @@ export class DashboardView {
     this.listeners = new Set();
     this.spec = spec;
     this.specKey = JSON.stringify(spec);
+    this.setStylesheets(this.isProblemPage ? [] : this.projectSheets);
     this.initParams(spec, initial);
 
+    this.article.dataset.dashboard = String(spec.slug || "");
+    document.documentElement.dataset.dashboard = String(spec.slug || "");
+    applyOverrides(this.article, spec.theme);
     this.titleEl.textContent = spec.title || spec.slug;
     this.descEl.textContent = spec.description || "";
     this.descEl.hidden = !spec.description;
 
     const ctx = this.ctx;
-    const rows = (spec.layout || []).map((row) => {
+    const rows = (spec.layout || []).map((row, r) => {
       const parts = row.map((comp) => this.make(comp, ctx));
       const types = row.map((c) => c.type);
       const el = h("div", {
         class: [
           "row",
+          "eui-row",
           types.every((t) => t === "stat") ? "row-stats" : null,
           types.includes("controls") ? "row-controls" : null,
         ],
+        dataset: { row: r + 1 },
       }, parts.map((p) => p.el));
       const basis = Math.max(...types.map((t) => BASIS[t] || 18));
       el.style.setProperty("--basis", `${basis}rem`);
@@ -201,7 +286,7 @@ export class DashboardView {
     fill(this.rowsEl, rows);
     this.writeAddress();
     if (this.consumers.size) this.run(Array.from(this.consumers.keys()));
-    else queueMicrotask(() => this.onLoaded("ok")); // nothing to load (text only, or a page listing problems)
+    else queueMicrotask(() => this.loaded("ok")); // nothing to load (text only, or a page listing problems)
   }
 
   make(comp, ctx) {
@@ -294,7 +379,7 @@ export class DashboardView {
     }
     if (seq === this.seq) {
       this.showBanner(noData);
-      this.onLoaded(outcome);
+      this.loaded(outcome);
     }
   }
 
@@ -331,5 +416,9 @@ export class DashboardView {
   destroy() {
     for (const part of this.parts) part.destroy();
     this.parts = [];
+    this.unsubscribeTheme();
+    if (document.documentElement.dataset.dashboard === String(this.spec.slug || "")) {
+      delete document.documentElement.dataset.dashboard;
+    }
   }
 }

@@ -97,6 +97,7 @@ export const api = {
   dashboard: (slug) => call("GET", `dashboards/${encodeURIComponent(slug)}`),
   query: (dashboard, queries, params) => call("POST", "query", { dashboard, queries, params }),
   rev: () => call("GET", "rev"),
+  styles: () => call("GET", "styles"),
   passkeyOptions: (purpose) => call("POST", "passkeys/options", { purpose }),
   passkeyLogin: (credential) => call("POST", "passkeys/login", { credential }),
   passkeyRegister: (credential, name) => call("POST", "passkeys/register", { credential, name }),

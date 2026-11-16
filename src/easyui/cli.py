@@ -257,6 +257,14 @@ def _cmd_validate(args: argparse.Namespace) -> Result:
         report = _validate_without_app(args.files)
     else:
         report = spec.validate_app(cfg, args.files or None, check_data=not args.no_data)
+        if not args.files:
+            from easyui import styles  # noqa: PLC0415
+
+            look = styles.validate_project(cfg)
+            report["styles"] = look
+            report["errors"] += len(look["errors"])
+            report["warnings"] += len(look["warnings"])
+            report["ok"] = report["ok"] and look["ok"]
     lines = []
     for d in report["dashboards"]:
         state = "ok" if d["ok"] else f"{len(d['errors'])} problem(s)"
@@ -267,12 +275,27 @@ def _cmd_validate(args: argparse.Namespace) -> Result:
                 allowed=p.get("allowed"), did_you_mean=p.get("did_you_mean"), level=p["level"], place=p.get("place"),
             )
             lines.append(("  error:   " if p["level"] == "error" else "  warning: ") + prob.text())
+    look = report.get("styles")
+    if look is not None:
+        f = look["files"]
+        if f["theme"] or f["stylesheets"] or f["assets"] or look["errors"]:
+            n_files = (1 if f["theme"] else 0) + len(f["stylesheets"]) + len(f["assets"])
+            state = "ok" if look["ok"] else f"{len(look['errors'])} problem(s)"
+            lines.append(f"The look (theme, {len(f['stylesheets'])} stylesheet(s), {len(f['assets'])} asset(s); "
+                         f"{n_files} file(s)): {state}" + (f", {len(look['warnings'])} warning(s)" if look["warnings"] else ""))
+            for p in look["errors"] + look["warnings"]:
+                prob = spec.Problem(file=p["file"], where=p.get("where", ""), message=p["problem"], line=p.get("line"),
+                                    hint=p.get("hint"), allowed=p.get("allowed"), did_you_mean=p.get("did_you_mean"),
+                                    level=p["level"], place=p.get("place"))
+                lines.append(("  error:   " if p["level"] == "error" else "  warning: ") + prob.text())
+        lines += look["notes"]
     lines += report["notes"]
     if report["data"]["note"]:
         lines.append(report["data"]["note"])
     if report["dashboards"]:
         lines.append(
-            "All dashboards are valid." if report["ok"] else
+            ("All dashboards are valid" + (" and so is their look." if look and look["files"]["theme"] or look and
+                                           look["files"]["stylesheets"] else ".")) if report["ok"] else
             f"Found {report['errors']} problem(s). Fix them and run easy-ui validate again."
         )
     return Result(report, "\n".join(lines), 0 if report["ok"] else 1)
@@ -339,7 +362,7 @@ def build_parser() -> tuple[ArgumentParser, list[str]]:
     p.add_argument("--samples", type=int, default=3, help="sample values per column (0-10, default 3)")
     p.set_defaults(func=_cmd_tables)
 
-    p = sub.add_parser("validate", help="Check dashboard files (default: every file in ui/dashboards/).")
+    p = sub.add_parser("validate", help="Check dashboard files, the theme, stylesheets and assets (default: all).")
     p.add_argument("files", nargs="*", help="dashboard files to check")
     p.add_argument("--no-data", action="store_true", help="do not check queries against the current data")
     p.set_defaults(func=_cmd_validate)
@@ -352,9 +375,10 @@ def build_parser() -> tuple[ArgumentParser, list[str]]:
     lst = data_sub.add_parser("list", help="List the builds of the dashboard data.")
     lst.set_defaults(func=_cmd_data_list)
 
-    from easyui import demo  # noqa: PLC0415
+    from easyui import demo, styles  # noqa: PLC0415
 
     demo.register(sub)
+    styles.register(sub)
 
     problems: list[str] = []
     for module in COMMAND_MODULES:

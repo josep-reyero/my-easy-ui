@@ -1,0 +1,44 @@
+# easy-ui ready-made theme. Copy it with: easy-ui theme use trail
+name: Trail
+description: A field map. Sage paper, pine and ochre, slab-serif figures and dotted contour gridlines.
+
+colors:
+  accent: "#2c6a4f"
+  background: "#edefe8"
+  surface: "#f8f9f4"
+  text: "#1f2a24"
+  muted: "#56625a"
+  border: "#d1d7c9"
+  grid: "#dfe4d7"
+  good: "#3b7a37"
+  bad: "#a4452c"
+  chart: ["#2c6a4f", "#b07d22", "#4f78a0", "#9b5d3f", "#6f8a2e"]
+
+dark:
+  accent: "#78c29c"
+  background: "#121713"
+  surface: "#1a211c"
+  text: "#e4e9e1"
+  muted: "#9aa79d"
+  border: "#2c362f"
+  grid: "#262f28"
+  good: "#8fcf8a"
+  bad: "#f0a080"
+  chart: ["#78c29c", "#e0b25a", "#8fb3d9", "#d4906b", "#b5c46a"]
+
+fonts:
+  body: humanist
+  headings: slab
+  numbers: slab
+
+type:
+  size: 16
+  scale: 1.22
+radius: 6
+density: normal
+cards: flat
+chart:
+  line_width: 2.25
+  grid: dotted
+  area_opacity: 0.2
+  bar_radius: 2

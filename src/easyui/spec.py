@@ -81,7 +81,7 @@ from easyui.errors import EasyUIError, NotFound, ParamError, QueryTimeout, SpecE
 SPEC_VERSION = "easy-ui/v1"
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}\Z")
 NAME_RE = sandbox.PARAM_NAME_RE
-TOP_KEYS = ("spec", "title", "description", "params", "queries", "layout")
+TOP_KEYS = ("spec", "title", "description", "params", "queries", "layout", "theme")
 REQUIRED_TOP = ("spec", "title", "layout")
 PARAM_TYPES: dict[str, tuple[str, ...]] = {
     "choice": ("type", "label", "default", "options"),
@@ -156,6 +156,18 @@ _STEP = Setting(
     "The gap between the lines across the chart, in the query's own numbers (for distance in metres, 5000 is a "
     "line every 5 km). Not set: round steps chosen from the values.",
 )
+_ID = Setting(
+    "component_id",
+    "A stable name for this component (lowercase letters, digits and -), shown as data-id for stylesheets. "
+    "Not set: r<row>c<column>, which changes when the layout changes.",
+)
+_CLASS = Setting(
+    "classes",
+    "Space-separated names of your own for stylesheets (lowercase letters, digits and -, not starting with eui-).",
+)
+COMPONENT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,40}\Z")
+_AUTO_ID_RE = re.compile(r"^r\d+c\d+\Z")
+MAX_CLASSES = 8
 _Y = Setting(
     "columns",
     "Column, or list of up to 8 columns, drawn as series. Name them nicely in the SQL with AS.",
@@ -239,6 +251,9 @@ COMPONENTS: dict[str, dict[str, Any]] = {
         },
     },
 }
+for _c in COMPONENTS.values():
+    _c["settings"]["id"] = _ID
+    _c["settings"]["class"] = _CLASS
 COMPONENT_TYPES = tuple(COMPONENTS)
 
 _KIND_TEXT = {
@@ -259,6 +274,8 @@ _KIND_TEXT = {
     "partial": "last, or a column name returned by the query",
     "step": "a number above 0",
     "phone": "cards or scroll",
+    "component_id": "lowercase letters, digits and -, starting with a letter (up to 41)",
+    "classes": f"up to {MAX_CLASSES} space-separated names of lowercase letters, digits and -",
 }
 
 EXAMPLE = """\
@@ -302,6 +319,8 @@ def catalog() -> dict[str, Any]:
             "params": "optional, name -> param (the values viewers can change)",
             "queries": "name -> {sql: one read-only SELECT using :param placeholders}",
             "layout": "required, a list of rows; each row is a list of up to 6 components",
+            "theme": "optional, this dashboard's own look: the settings of ui/theme.yaml except name, description "
+            "and font_files (see: easy-ui style-guide)",
         },
         "names": "param and query names: lowercase letters, digits and _, starting with a letter (up to 31)",
         "params": {
@@ -802,6 +821,7 @@ class Dashboard:
     warnings: list[Problem] = field(default_factory=list)
     column_refs: list[tuple[tuple[Any, ...], str, str]] = field(default_factory=list)
     lines: dict[tuple[Any, ...], int] = field(default_factory=dict, repr=False)
+    theme: dict[str, dict[str, str]] | None = None  # this dashboard's theme: as custom properties
 
     def query(self, name: str) -> Query:
         q = self.queries.get(name) if isinstance(name, str) else None
@@ -1120,6 +1140,40 @@ def _check_setting(ctx: _Ctx, path, kind: str, s: Setting, v: Any, ctype: str, d
             ctx.err(path, f"{what} must be a number above 0.", hint="For example step: 5000 for a line every 5 km of metres.")
             return _BAD
         return v
+    if kind == "component_id":
+        if not isinstance(v, str) or not COMPONENT_ID_RE.match(v):
+            ctx.err(path, f"id is {str(v)[:45]!r}, which cannot be used as a component's name.",
+                    hint="Use lowercase letters, digits and -, starting with a letter, for example id: weekly-distance.")
+            return _BAD
+        if _AUTO_ID_RE.match(v):
+            ctx.err(path, f'id "{v}" looks like the names easy-ui gives components without an id (r0c1).',
+                    hint="Pick a name that says what the component shows, for example id: weekly-distance.")
+            return _BAD
+        ids = dash.setdefault("ids", set())
+        if v in ids:
+            ctx.err(path, f'Two components have the id "{v}", so a stylesheet could not tell them apart.',
+                    hint="Give each component its own id.")
+            return _BAD
+        ids.add(v)
+        return v
+    if kind == "classes":
+        words = v.split() if isinstance(v, str) else v if isinstance(v, list) else None
+        if not words or not all(isinstance(w, str) for w in words):
+            ctx.err(path, "class must be one or more names separated by spaces.", hint="For example: class: wide highlight")
+            return _BAD
+        if len(words) > MAX_CLASSES:
+            ctx.err(path, f"class has {len(words)} names; at most {MAX_CLASSES} are allowed.", hint="Use fewer names.")
+            return _BAD
+        for w in words:
+            if w.startswith("eui-"):
+                ctx.err(path, f'The class name "{w[:45]}" starts with eui-, which is kept for easy-ui\'s own names.',
+                        hint="Use a name of your own, for example class: highlight.")
+                return _BAD
+            if not COMPONENT_ID_RE.match(w):
+                ctx.err(path, f"The class name {w[:45]!r} cannot be used.",
+                        hint="Use lowercase letters, digits and -, starting with a letter, for example class: highlight.")
+                return _BAD
+        return list(dict.fromkeys(words))
     if kind == "bool":
         if not isinstance(v, bool):
             ctx.err(path, f"{what} must be true or false.")
@@ -1216,6 +1270,8 @@ def _check_component(ctx: _Ctx, path, raw: Any, dash: dict, refs: list, r: int, 
     out: dict[str, Any] = {"id": f"r{r}c{c}", "type": ctype}
     ok = True
     for key, s in settings.items():
+        if key == "id" and raw.get("id") is None:
+            continue  # keeps the automatic r<row>c<column>
         if key not in raw or raw[key] is None:
             if s.required:
                 about = s.description[:1].lower() + s.description[1:].rstrip(".")
@@ -1297,6 +1353,13 @@ def _check(text: str, *, slug: str, file: str = "<text>") -> tuple[Dashboard | N
         if description is _BAD:
             description = None
 
+    # theme: this dashboard's own look (easyui.theme)
+    theme_tokens = None
+    if data.get("theme") is not None:
+        from easyui import theme as _theme  # noqa: PLC0415 - theme uses this module's helpers
+
+        theme_tokens = _theme.check_overrides(ctx, ("theme",), data["theme"])
+
     # params
     params: dict[str, Param] = {}
     raw_params = data.get("params") or {}
@@ -1362,6 +1425,7 @@ def _check(text: str, *, slug: str, file: str = "<text>") -> tuple[Dashboard | N
     dash_ctx = {
         "queries": dict.fromkeys(known_query_names, True),
         "params": dict.fromkeys(list(params) + sorted(bad_params), True),
+        "ids": set(),
     }
     raw_layout = data.get("layout")
     if "layout" in data:
@@ -1397,6 +1461,7 @@ def _check(text: str, *, slug: str, file: str = "<text>") -> tuple[Dashboard | N
         partial = Dashboard(
             slug=slug, title=title if isinstance(title, str) else slug, description=description, params=params,
             queries=queries, layout=layout, file=file, warnings=[], column_refs=refs, lines=lines,
+            theme=theme_tokens,
         )
         return None, partial, ctx.errors, ctx.warnings
 
@@ -1426,6 +1491,7 @@ def _check(text: str, *, slug: str, file: str = "<text>") -> tuple[Dashboard | N
         warnings=list(ctx.warnings),
         column_refs=refs,
         lines=lines,
+        theme=theme_tokens,
     )
     return dash, dash, ctx.errors, ctx.warnings
 
@@ -1708,6 +1774,7 @@ def compile_dashboard(dash: Dashboard, *, today: _dt.date | None = None) -> dict
         "params": params,
         "queries": {name: {"params": list(dash.queries[name].params)} for name in used},
         "layout": copy.deepcopy(dash.layout),
+        "theme": copy.deepcopy(dash.theme),
     }
 
 

@@ -8,6 +8,20 @@ import { renderBlocks } from "./text.js";
 
 // ---- shared helpers -----------------------------------------------------
 
+const OWN_CLASS = /^[a-z][a-z0-9-]{0,40}$/;
+const COMPONENT_ID = /^[a-z0-9][a-z0-9-]{0,40}$/;
+
+/**
+ * The stable names of a component's element (docs/STYLES.md): .eui-component, data-type, data-id and the
+ * classes of its class: setting.
+ */
+export function componentProps(comp, extra) {
+  const own = Array.isArray(comp.class) ? comp.class.filter((c) => typeof c === "string" && OWN_CLASS.test(c) && !c.startsWith("eui-")) : [];
+  const dataset = { type: String(comp.type) };
+  if (typeof comp.id === "string" && COMPONENT_ID.test(comp.id)) dataset.id = comp.id;
+  return { class: ["c", `c-${comp.type}`, "eui-component", extra, ...own], dataset };
+}
+
 /** A column name shown as a heading when the dashboard gives no label: "distance_m" -> "Distance m". */
 export function humanize(name) {
   const s = String(name);
@@ -46,11 +60,11 @@ export class Frame {
     this.ctx = ctx;
     this.titleId = nextId("t");
     this.el = h("section", {
-      class: ["c", `c-${comp.type}`, extraClass],
+      ...componentProps(comp, extraClass),
       attrs: { "aria-labelledby": comp.title ? this.titleId : null, "aria-label": comp.title ? null : comp.type },
     });
     this.head = h("div", { class: "c-head" });
-    if (comp.title) this.head.append(h("h2", { class: "c-title", id: this.titleId, text: comp.title }));
+    if (comp.title) this.head.append(h("h2", { class: "c-title eui-title", id: this.titleId, text: comp.title }));
     this.body = h("div", { class: "c-body" });
     this.el.append(this.head, this.body);
     this.hasContent = false;
@@ -67,7 +81,7 @@ export class Frame {
       this.el.classList.add("is-updating");
       return;
     }
-    this.el.classList.remove("is-empty", "is-error");
+    this.el.classList.remove("is-empty", "is-error", "eui-empty", "eui-error");
     fill(this.body, this.loadingView());
   }
 
@@ -108,7 +122,7 @@ export class Frame {
       return;
     }
     this.hasContent = true;
-    this.el.classList.remove("is-empty", "is-error");
+    this.el.classList.remove("is-empty", "is-error", "eui-empty", "eui-error");
     this.render({ columns, rows, truncated: Boolean(result.truncated) });
   }
 
@@ -132,8 +146,8 @@ export class Frame {
   showEmpty() {
     this.hasContent = false;
     this.disposeContent();
-    this.el.classList.remove("is-error");
-    this.el.classList.add("is-empty");
+    this.el.classList.remove("is-error", "eui-error");
+    this.el.classList.add("is-empty", "eui-empty");
     const reset = this.ctx.queryHasControls(this.comp.query) && this.ctx.paramsDiffer()
       ? h("button", {
         class: "btn-quiet",
@@ -156,8 +170,8 @@ export class Frame {
     this.done();
     this.hasContent = false;
     this.disposeContent();
-    this.el.classList.remove("is-empty");
-    this.el.classList.add("is-error");
+    this.el.classList.remove("is-empty", "eui-empty");
+    this.el.classList.add("is-error", "eui-error");
     const message = (err && typeof err.message === "string" && err.message) || "This part of the page could not be shown.";
     const hint = err && typeof err.hint === "string" ? err.hint : null;
     const children = [
@@ -190,14 +204,14 @@ function figure(text, className) {
   const [num, unit] = splitUnit(text);
   return h("span", { class: className }, [
     h("span", { class: "fig", text: num }),
-    unit ? h("span", { class: "unit", text: unit }) : null,
+    unit ? h("span", { class: "unit eui-unit", text: unit }) : null,
   ]);
 }
 
 export class Stat extends Frame {
   constructor(comp, ctx) {
     super(comp, ctx);
-    this.hint = comp.hint ? h("p", { class: "stat-hint", text: comp.hint }) : null;
+    this.hint = comp.hint ? h("p", { class: "stat-hint eui-hint", text: comp.hint }) : null;
   }
 
   requiredColumns() {
@@ -217,7 +231,7 @@ export class Stat extends Frame {
     const text = display(this.comp.format, value);
     // A date or a word is not a quantity: it is shown smaller than numbers, so it never outweighs them.
     const isText = this.comp.format === "date" || this.comp.format === "datetime" || numeric(value) === null;
-    const out = [h("p", { class: ["stat-value", isText ? "is-text" : null] }, figure(text, "stat-figure"))];
+    const out = [h("p", { class: ["stat-value", "eui-value", isText ? "is-text" : null] }, figure(text, "stat-figure"))];
     if (this.comp.delta) {
       const d = numeric(row[columns.indexOf(this.comp.delta)]);
       if (d !== null) {
@@ -236,7 +250,7 @@ export class Stat extends Frame {
           const moodWords = mood === "is-good" ? " (better)" : mood === "is-bad" ? " (worse)" : "";
           const words = dir === "up" ? `up${moodWords}` : dir === "down" ? `down${moodWords}` : "no change,";
           out.push(
-            h("p", { class: ["stat-delta", `is-${dir}`, mood || null] }, [
+            h("p", { class: ["stat-delta", "eui-delta", `is-${dir}`, mood || null] }, [
               h("span", { class: "delta-mark", attrs: { "aria-hidden": "true" }, text: dir === "up" ? "↗" : dir === "down" ? "↘" : "→" }),
               h("span", { class: "sr-only", text: `${words} ` }),
               h("span", { text: `${sign}${mag}` }),
@@ -253,7 +267,7 @@ export class Stat extends Frame {
     super.showEmpty();
     fill(
       this.body,
-      h("p", { class: "stat-value is-none" }, h("span", { class: "stat-figure" }, h("span", { class: "fig", text: NULL_TEXT }))),
+      h("p", { class: "stat-value eui-value is-none" }, h("span", { class: "stat-figure" }, h("span", { class: "fig", text: NULL_TEXT }))),
       h("p", { class: "state-hint", text: this.ctx.queryHasControls(this.comp.query) ? "No data for these settings." : "No data yet." }),
     );
   }
@@ -322,7 +336,7 @@ export class Table extends Frame {
     const thead = h("thead", null, h("tr", null, cols.map((c, pos) => {
       const sorted = this.sort && this.sort.pos === pos;
       const th = h("th", {
-        class: c.numeric ? "num" : null,
+        class: ["eui-th", c.numeric ? "num" : null],
         attrs: { scope: "col", "aria-sort": sorted ? (this.sort.dir > 0 ? "ascending" : "descending") : null },
       });
       th.append(
@@ -343,7 +357,7 @@ export class Table extends Frame {
     const tbody = h("tbody", null, shown.map((r) => h("tr", null, cols.map((c) => {
       const v = r[c.index];
       return h("td", {
-        class: [c.numeric ? "num" : null, v === null ? "is-null" : null],
+        class: ["eui-td", c.numeric ? "num" : null, v === null ? "is-null" : null],
         dataset: { label: c.label },
         text: display(c.format, v),
       });
@@ -354,7 +368,7 @@ export class Table extends Frame {
       class: ["table-scroll", cards ? "t-cards" : null],
       tabIndex: 0,
       attrs: { role: "region", "aria-label": cards ? label : `${label} (scrolls sideways)` },
-    }, h("table", null, [h("caption", { class: "sr-only", text: label }), thead, tbody]));
+    }, h("table", { class: "eui-table" }, [h("caption", { class: "sr-only", text: label }), thead, tbody]));
 
     const notes = [];
     if (shown.length < rows.length) notes.push(`Showing ${shown.length.toLocaleString("en")} of ${rows.length.toLocaleString("en")} rows.`);
@@ -386,11 +400,11 @@ export class TextBlock {
     this.comp = comp;
     const titleId = nextId("t");
     this.el = h("section", {
-      class: "c c-text",
+      ...componentProps(comp),
       attrs: { "aria-labelledby": comp.title ? titleId : null, "aria-label": comp.title ? null : "Notes" },
     }, [
-      comp.title ? h("h2", { class: "c-title", id: titleId, text: comp.title }) : null,
-      h("div", { class: "prose" }, renderBlocks(comp.blocks, comp.title ? 3 : 2)),
+      comp.title ? h("h2", { class: "c-title eui-title", id: titleId, text: comp.title }) : null,
+      h("div", { class: "prose eui-text" }, renderBlocks(comp.blocks, comp.title ? 3 : 2)),
     ]);
   }
 
@@ -442,13 +456,13 @@ export class Controls {
     // A shared copy shows its settings as plain values; a picture (fixed: "picture") draws the real inputs.
     if (ctx.fixed === true) {
       this.el = h("section", {
-        class: "c c-controls is-fixed",
+        ...componentProps(comp, "is-fixed"),
         attrs: { "aria-labelledby": comp.title ? titleId : null, "aria-label": comp.title ? null : "Settings of this copy" },
       }, [
-        comp.title ? h("h2", { class: "c-title", id: titleId, text: comp.title }) : null,
+        comp.title ? h("h2", { class: "c-title eui-title", id: titleId, text: comp.title }) : null,
         h("dl", { class: "fixed-values" }, names.map((n) => {
           const p = ctx.paramDefs.get(n);
-          return h("div", { class: "fixed-value" }, [h("dt", { text: p.label }), h("dd", { text: fixedText(p, ctx.params.get(n)) })]);
+          return h("div", { class: "fixed-value eui-control" }, [h("dt", { text: p.label }), h("dd", { text: fixedText(p, ctx.params.get(n)) })]);
         })),
         h("p", { class: "fixed-note", text: "This shared copy shows the numbers for these settings." }),
       ]);
@@ -456,10 +470,10 @@ export class Controls {
       return;
     }
     this.el = h("section", {
-      class: "c c-controls",
+      ...componentProps(comp),
       attrs: { "aria-labelledby": comp.title ? titleId : null, "aria-label": comp.title ? null : "Settings" },
     }, [
-      comp.title ? h("h2", { class: "c-title", id: titleId, text: comp.title }) : null,
+      comp.title ? h("h2", { class: "c-title eui-title", id: titleId, text: comp.title }) : null,
       h("div", { class: "controls" }, [...names.map((n) => this.control(ctx.paramDefs.get(n))), this.reset]),
       this.message,
     ]);
@@ -536,9 +550,10 @@ export class Controls {
       const later = debounce(() => this.ctx.setParam(p.name, input.value), 400);
       input.addEventListener("input", later);
       input.addEventListener("change", () => { later.cancel(); this.ctx.setParam(p.name, input.value); });
-      this.inputs.set(p.name, { sync: (v) => { if (document.activeElement !== input && input.value !== v) input.value = v; } });
+      // The dashboard is in its own document tree, so the focused input is asked of that tree, not the page.
+      this.inputs.set(p.name, { sync: (v) => { if (input.getRootNode().activeElement !== input && input.value !== v) input.value = v; } });
     }
-    return h("div", { class: `field field-${p.type}` }, [label, input]);
+    return h("div", { class: `field field-${p.type} eui-control` }, [label, input]);
   }
 
   choice(p, id) {
@@ -560,7 +575,7 @@ export class Controls {
           for (const [radio] of radios) radio.checked = radio.value === String(v);
         },
       });
-      return h("div", { class: "field field-choice", attrs: { role: "radiogroup", "aria-labelledby": legendId } }, [
+      return h("div", { class: "field field-choice eui-control", attrs: { role: "radiogroup", "aria-labelledby": legendId } }, [
         h("span", { class: "field-label", id: legendId, text: p.label }),
         h("div", { class: "seg" }, radios),
       ]);
@@ -569,7 +584,7 @@ export class Controls {
       options.map((o) => h("option", { value: String(o.value), text: o.label })));
     select.addEventListener("change", () => this.ctx.setParam(p.name, byKey.get(select.value)));
     this.inputs.set(p.name, { sync: (v) => { select.value = String(v); } });
-    return h("div", { class: "field field-choice" }, [
+    return h("div", { class: "field field-choice eui-control" }, [
       h("label", { class: "field-label", htmlFor: id, text: p.label }),
       h("div", { class: "select-wrap" }, [select, icon("back")]),
     ]);

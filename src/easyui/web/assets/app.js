@@ -14,6 +14,7 @@ import { DashboardView } from "./dashboard.js";
 import { startRefresh } from "./refresh.js";
 import { SignInSettings } from "./settings.js";
 import { passkeysSupported } from "./passkey.js";
+import { loadLook, projectStylesheets, useLook, forgetLook, lookReady } from "./look.js";
 
 const SLUG = /^[a-z0-9][a-z0-9-]{0,40}$/;
 const root = document.getElementById("app");
@@ -45,6 +46,7 @@ function message(title, hint, actions = []) {
 }
 
 function fatal(err, retry) {
+  useLook(false);
   const info = describe(err);
   fill(root, h("main", { class: "standalone", id: "main" }, message(info.message, info.hint, [
     h("button", { class: "btn-primary", type: "button", text: "Try again", on: { click: retry } }),
@@ -205,11 +207,14 @@ async function route() {
     return;
   }
   if (r.name === "home" || r.name === "list") {
+    useLook(true);
     renderNav();
     renderHome();
     return;
   }
   if (r.name === "settings" && !state.preview && !state.exported) {
+    // easy-ui's own screens never take the project's look.
+    useLook(false);
     renderNav();
     const view = new SignInSettings({
       app: state.app,
@@ -238,18 +243,27 @@ async function route() {
     if (state.slug !== r.slug) return;
     if (err && err.status === 401) return;
     if (err && err.status === 404) showMissing();
-    else fill(main, message(describe(err).message, describe(err).hint, [
-      h("button", { class: "btn-primary", type: "button", text: "Try again", on: { click: () => { state.slug = null; route(); } } }),
-    ]));
+    else {
+      useLook(false);
+      fill(main, message(describe(err).message, describe(err).hint, [
+        h("button", { class: "btn-primary", type: "button", text: "Try again", on: { click: () => { state.slug = null; route(); } } }),
+      ]));
+    }
     return;
   }
   if (state.slug !== r.slug) return;
+  // A page that lists problems is easy-ui's own: drawn without the project's look.
+  useLook(!(spec && spec.problems));
   const view = new DashboardView({
     spec,
     initial: r.query,
-    onLoaded: (outcome) => {
+    project: state.app.name,
+    stylesheets: projectStylesheets(),
+    onLoaded: async (outcome) => {
       // Only a load that worked moves "Checked"; a failed one says so instead of looking fresh.
       if (outcome === "ok") state.updatedAt = new Date();
+      await lookReady();
+      if (state.view !== view) return;
       // For tools that take pictures of the page (easy-ui screenshot): every part has loaded.
       document.body.dataset.loaded = outcome;
       if (outcome === "offline") state.refreshState = "offline";
@@ -264,6 +278,7 @@ async function route() {
 }
 
 function showMissing() {
+  useLook(false);
   document.title = `Not found – ${state.app.title || state.app.name}`;
   fill(state.shell.main, message(
     "This dashboard does not exist",
@@ -275,12 +290,14 @@ function showMissing() {
 // ---- refresh --------------------------------------------------------------
 
 async function onRevChange() {
+  let lookChanged = false;
   try {
-    state.dashboards = await api.dashboards();
+    [state.dashboards, lookChanged] = await Promise.all([api.dashboards(), loadLook()]);
   } catch {
     return;
   }
   renderNav();
+  if (lookChanged && state.view && typeof state.view.setLook === "function") state.view.setLook(projectStylesheets());
   if (state.view) {
     state.refreshState = "updating";
     showStatus();
@@ -300,6 +317,7 @@ async function onRevChange() {
 // ---- session --------------------------------------------------------------
 
 function teardown() {
+  forgetLook();
   if (state.stopRefresh) state.stopRefresh();
   state.stopRefresh = null;
   leaveView();
@@ -352,7 +370,11 @@ async function startApp() {
   state.stopSignIn = null;
   let rev = null;
   try {
-    [state.dashboards, rev] = await Promise.all([api.dashboards(), api.rev().then((r) => r.rev).catch(() => null)]);
+    [state.dashboards, rev] = await Promise.all([
+      api.dashboards(),
+      api.rev().then((r) => r.rev).catch(() => null),
+      loadLook(),
+    ]);
   } catch (err) {
     if (err && err.status === 401) return;
     fatal(err, startApp);

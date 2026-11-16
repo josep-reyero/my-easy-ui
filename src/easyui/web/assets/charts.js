@@ -1,5 +1,11 @@
 // line, area and bar charts, drawn by Apache ECharts (assets/vendor).
 //
+// A chart is drawn on a canvas, which CSS cannot reach, so it reads its look
+// from the custom properties of its own element (.eui-chart): the series
+// colours --eui-chart-1 ... -8, the font, label, axis and grid colours, the
+// line width, the gridline style, the area opacity and the bar radius (see
+// docs/STYLES.md). Setting them on one component restyles just that chart.
+//
 // ECharts only ever receives data and colours. No formatter strings, rich
 // text or HTML from a dashboard or its data reach it: axis labels use our own
 // functions, and the hover readout above each chart is built here with text
@@ -8,7 +14,7 @@
 import { h, fill, icon, prefersReducedMotion } from "./dom.js";
 import { Frame, humanize, scrollCue } from "./components.js";
 import { axisFormatter, axisStep, display, looksLikeDates, numeric, shortDate, splitUnit, NULL_TEXT } from "./format.js";
-import { palette, onThemeChange } from "./theme.js";
+import { onThemeChange, resolveColor } from "./theme.js";
 
 let loading = null;
 
@@ -31,8 +37,36 @@ export function loadECharts() {
   return loading;
 }
 
-function fontFamily() {
-  return getComputedStyle(document.body).fontFamily || "system-ui, sans-serif";
+const GRID_STYLES = new Set(["solid", "dashed", "dotted", "none"]);
+
+function num(text, fallback, lo, hi) {
+  const n = Number.parseFloat(text);
+  return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : fallback;
+}
+
+/** The look of one chart, from the custom properties of its element. */
+export function chartStyle(el) {
+  const cs = getComputedStyle(el);
+  const get = (name) => cs.getPropertyValue(name).trim();
+  const colour = (name, fallback) => resolveColor(get(name)) || fallback;
+  const series = [];
+  for (let i = 1; i <= 8; i += 1) series.push(colour(`--eui-chart-${i}`, "#3d6fb6"));
+  const grid = get("--eui-chart-grid-style").replace(/^["']|["']$/g, "");
+  const family = get("--eui-chart-font") || cs.fontFamily || "system-ui, sans-serif";
+  return {
+    series,
+    surface: colour("--eui-surface", "#ffffff"),
+    label: colour("--eui-chart-label", "#5a6472"),
+    axis: colour("--eui-chart-axis", "#dde2e8"),
+    grid: colour("--eui-chart-grid", "#e9ecf0"),
+    soft: colour("--eui-accent-soft", "#e6edf7"),
+    font: family,
+    fontSize: num(get("--eui-chart-font-size"), 11, 6, 32),
+    lineWidth: num(get("--eui-chart-line-width"), 2, 0, 12),
+    gridStyle: GRID_STYLES.has(grid) ? grid : "solid",
+    areaOpacity: num(get("--eui-chart-area-opacity"), 0.16, 0, 1),
+    barRadius: num(get("--eui-chart-bar-radius"), 3, 0, 40),
+  };
 }
 
 function isTrue(v) {
@@ -46,7 +80,7 @@ export class Chart extends Frame {
     this.data = null;
     this.index = -1;
     this.asTable = false;
-    this.readout = h("div", { class: "readout", attrs: { "aria-hidden": "true" } });
+    this.readout = h("div", { class: "readout eui-readout", attrs: { "aria-hidden": "true" } });
     this.head.append(this.readout);
     this.unsubscribeTheme = onThemeChange(() => this.redraw());
   }
@@ -180,8 +214,8 @@ export class Chart extends Frame {
 
   buildBody() {
     const label = this.comp.title || "Chart";
-    this.canvas = h("div", { class: "chart", attrs: { role: "img" } });
-    this.legend = h("ul", { class: "legend", attrs: { "aria-hidden": "true" } });
+    this.canvas = h("div", { class: "chart eui-chart", attrs: { role: "img" } });
+    this.legend = h("ul", { class: "legend eui-legend", attrs: { "aria-hidden": "true" } });
     this.tableHost = h("div", { class: "chart-table", hidden: true });
     this.note = h("p", { class: "c-note", hidden: true });
     this.toggle = h("button", {
@@ -194,12 +228,13 @@ export class Chart extends Frame {
   }
 
   option() {
-    const p = palette();
+    const p = chartStyle(this.canvas);
+    this.look = p;
     const { xs, series, dates, spansYears, max } = this.data;
     const type = this.comp.type;
     const bar = type === "bar";
     const motion = !prefersReducedMotion();
-    const axisLabel = { color: p.ink2, fontSize: 11, fontFamily: fontFamily(), margin: 10 };
+    const axisLabel = { color: p.label, fontSize: p.fontSize, fontFamily: p.font, margin: 10 };
     const yFmt = axisFormatter(this.comp.format, max);
     const unitName = this.comp.unit || null;
     const partial = this.data.partial;
@@ -209,21 +244,21 @@ export class Chart extends Frame {
       animationDuration: 450,
       animationDurationUpdate: 250,
       animationEasing: "cubicOut",
-      textStyle: { fontFamily: fontFamily() },
+      textStyle: { fontFamily: p.font },
       color: p.series,
       grid: { left: 4, right: 8, top: unitName ? 28 : 14, bottom: 4, containLabel: true },
       tooltip: {
         trigger: "axis",
         showContent: false,
         axisPointer: bar
-          ? { type: "shadow", shadowStyle: { color: p.accentSoft, opacity: 0.6 } }
-          : { type: "line", lineStyle: { color: p.ink2, width: 1, type: "solid", opacity: 0.5 } },
+          ? { type: "shadow", shadowStyle: { color: p.soft, opacity: 0.6 } }
+          : { type: "line", lineStyle: { color: p.label, width: 1, type: "solid", opacity: 0.5 } },
       },
       xAxis: {
         type: "category",
         data: xs.map((x) => (x === null || x === undefined ? "" : String(x))),
         boundaryGap: bar,
-        axisLine: { lineStyle: { color: p.line } },
+        axisLine: { lineStyle: { color: p.axis } },
         axisTick: { show: false },
         axisLabel: {
           ...axisLabel,
@@ -244,7 +279,9 @@ export class Chart extends Frame {
         ...this.stepOptions(type),
         axisLine: { show: false },
         axisTick: { show: false },
-        splitLine: { lineStyle: { color: p.grid, width: 1 } },
+        splitLine: p.gridStyle === "none"
+          ? { show: false }
+          : { lineStyle: { color: p.grid, width: 1, type: p.gridStyle } },
         axisLabel: { ...axisLabel, formatter: (v) => yFmt(v) },
       },
       series: series.flatMap((s, i) => {
@@ -265,7 +302,7 @@ export class Chart extends Frame {
             barCategoryGap: "35%",
             large: s.values.length > 1500,
             emphasis: { disabled: true },
-            itemStyle: { color, borderRadius: this.comp.stacked && i < series.length - 1 ? 0 : [3, 3, 0, 0] },
+            itemStyle: { color, borderRadius: this.comp.stacked && i < series.length - 1 ? 0 : [p.barRadius, p.barRadius, 0, 0] },
           };
         }
         const line = {
@@ -276,10 +313,10 @@ export class Chart extends Frame {
           symbolSize: 7,
           connectNulls: false,
           sampling: s.values.length > 800 ? "lttb" : undefined,
-          lineStyle: { width: 2, color, cap: "round", join: "round" },
-          emphasis: { focus: "none", scale: false, lineStyle: { width: 2 } },
+          lineStyle: { width: p.lineWidth, color, cap: "round", join: "round" },
+          emphasis: { focus: "none", scale: false, lineStyle: { width: p.lineWidth } },
           itemStyle: { color, borderColor: p.surface, borderWidth: 2 },
-          areaStyle: type === "area" ? { color, opacity: series.length > 1 ? 0.1 : 0.16 } : undefined,
+          areaStyle: type === "area" ? { color, opacity: series.length > 1 ? p.areaOpacity * 0.6 : p.areaOpacity } : undefined,
         };
         if (!anyPartial) return line;
         // A period still in progress: the line into it is dashed and its point is an open circle.
@@ -298,7 +335,7 @@ export class Chart extends Frame {
             showSymbol: true,
             sampling: undefined,
             lineStyle: { ...line.lineStyle, type: [4, 4] },
-            areaStyle: type === "area" ? { color, opacity: 0.06 } : undefined,
+            areaStyle: type === "area" ? { color, opacity: p.areaOpacity * 0.4 } : undefined,
           },
         ];
       }),
@@ -325,9 +362,14 @@ export class Chart extends Frame {
     this.updateLegend();
   }
 
+  /** The page's styles changed (a stylesheet loaded, the theme changed): read the look again. */
+  restyle() {
+    this.redraw();
+  }
+
   updateLegend() {
     if (!this.legend) return;
-    const p = palette();
+    const p = this.look || chartStyle(this.canvas || this.el);
     const many = this.data.series.length > 1;
     this.legend.hidden = !many;
     if (!many) return;
@@ -362,7 +404,7 @@ export class Chart extends Frame {
       let [num, unit] = splitUnit(text);
       if (this.comp.unit && text !== NULL_TEXT) unit = unit ? `${unit} ${this.comp.unit}` : this.comp.unit;
       fill(this.readout,
-        h("span", { class: "readout-value" }, [h("span", { class: "fig", text: num }), unit ? h("span", { class: "unit", text: unit }) : null]),
+        h("span", { class: "readout-value eui-value" }, [h("span", { class: "fig", text: num }), unit ? h("span", { class: "unit eui-unit", text: unit }) : null]),
         h("span", { class: "readout-at", text: at }));
     } else {
       fill(this.readout, h("span", { class: "readout-at", text: at }));
@@ -407,22 +449,22 @@ export class Chart extends Frame {
     const { xs, series, dates } = this.data;
     const label = this.comp.title || "Chart";
     const head = h("tr", null, [
-      h("th", { attrs: { scope: "col" }, text: humanize(this.comp.x) }),
-      ...series.map((s) => h("th", { class: "num", attrs: { scope: "col" }, text: s.name })),
+      h("th", { class: "eui-th", attrs: { scope: "col" }, text: humanize(this.comp.x) }),
+      ...series.map((s) => h("th", { class: "num eui-th", attrs: { scope: "col" }, text: s.name })),
     ]);
     // Dates newest first, like every other list of recent things; categories in the query's order.
     const order = xs.map((_, i) => i);
     if (dates) order.reverse();
     const body = order.map((i) => h("tr", null, [
-      h("th", { attrs: { scope: "row" }, text: this.atText(i) }),
-      ...series.map((s) => h("td", { class: "num", text: this.valueText(s.values[i]) })),
+      h("th", { class: "eui-th", attrs: { scope: "row" }, text: this.atText(i) }),
+      ...series.map((s) => h("td", { class: "num eui-td", text: this.valueText(s.values[i]) })),
     ]));
     if (this.tableCue) this.tableCue.disposeCue();
     this.tableCue = scrollCue(h("div", {
       class: "table-scroll table-scroll-tall",
       tabIndex: 0,
       attrs: { role: "region", "aria-label": `${label} as a table` },
-    }, h("table", null, [h("caption", { class: "sr-only", text: label }), h("thead", null, head), h("tbody", null, body)])));
+    }, h("table", { class: "eui-table" }, [h("caption", { class: "sr-only", text: label }), h("thead", null, head), h("tbody", null, body)])));
     fill(this.tableHost, this.tableCue);
   }
 

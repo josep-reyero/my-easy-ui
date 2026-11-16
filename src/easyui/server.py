@@ -68,7 +68,13 @@ never taken from the request; each saved passkey keeps the RP ID it was made wit
                               gives ``{error: {code, message, hint}}`` in its own slot, so one broken
                               chart does not blank the page. All the queries of one request share
                               ``request_time_s`` (4 s); each one also has the sandbox's own limit (2 s).
-``GET /api/rev``              ``{rev}``; changes when the data or the published dashboards change.
+``GET /api/rev``              ``{rev}``; changes when the data, the published dashboards or their look change.
+``GET /api/styles``           ``{rev, theme_css, stylesheets: [names], assets: n}``: the look the dashboards use
+                              (``problem`` when the published look is damaged; the page then keeps easy-ui's own).
+``GET /ui/theme.css``, ``/ui/styles/<name>.css``, ``/ui/assets/<path>``  the project's generated theme stylesheet,
+                              its stylesheets and its fonts and pictures (signed in only; content type from the
+                              file's checked type; SVG with a sandboxing Content-Security-Policy and as a download
+                              when opened on its own).
 Errors are ``{"error": {"code", "message", "hint"}}`` with a fitting HTTP status (429 adds
 ``Retry-After``). Messages never contain stack traces or file paths.
 
@@ -910,6 +916,59 @@ async def api_rev(request: Request) -> Response:
     return JSONResponse({"rev": await run_in_threadpool(st.source.rev)})
 
 
+def _source_styles(st: ServerState) -> Any:
+    from easyui import styles  # noqa: PLC0415
+
+    get = getattr(st.source, "styles", None)
+    return get() if callable(get) else styles.EMPTY
+
+
+async def api_styles(request: Request) -> Response:
+    """Which theme stylesheet and project stylesheets the dashboards use (the files are under /ui/)."""
+    require_session(request)
+    st = _state(request)
+    try:
+        got = await run_in_threadpool(_source_styles, st)
+    except EasyUIError as e:
+        log.warning("the published look could not be used: %s", e.message)
+        return JSONResponse({"rev": "none", "theme_css": False, "stylesheets": [], "assets": 0,
+                             "problem": {"code": e.code, "message": security.scrub(e.message),
+                                         "hint": security.scrub(e.hint)}})
+    return JSONResponse(got.public())
+
+
+_UI_FILE_RE = re.compile(r"^(?:theme\.css|styles/[a-z0-9][a-z0-9._-]{0,60}\.css|assets/[A-Za-z0-9][A-Za-z0-9._/-]{0,300})\Z")
+
+
+async def page_ui_file(request: Request) -> Response:
+    """``/ui/theme.css``, ``/ui/styles/<name>.css`` and ``/ui/assets/<path>``: the project's look, after sign-in."""
+    st = _state(request)
+    if current_session(request) is None:
+        return _error_response(SignInRequired("You are not signed in, so the dashboards stay hidden.",
+                                              hint="Sign in with this project's password."))
+    rel = request.url.path[len("/ui/"):]
+    if not _UI_FILE_RE.match(rel) or "//" in rel or "/." in rel or rel.endswith("/"):
+        raise HTTPException(404)
+    try:
+        got = await run_in_threadpool(lambda: _source_styles(st).get(rel))
+    except EasyUIError:
+        got = None
+    if got is None:
+        raise HTTPException(404)
+    data, ctype = got
+    etag = '"' + hashlib.sha256(data).hexdigest()[:32] + '"'
+    headers = {"etag": etag, "cache-control": REVALIDATE}
+    if ctype == "image/svg+xml":
+        # An SVG is only ever a picture here: opened on its own it would be a document, so it is a download in a
+        # sandbox that can run nothing.
+        headers["content-security-policy"] = "default-src 'none'; sandbox"
+        headers["content-disposition"] = 'attachment; filename="image.svg"'
+    inm = request.headers.get("if-none-match")
+    if inm and etag in [t.strip().removeprefix("W/") for t in inm.split(",")]:
+        return Response(status_code=304, headers=headers)
+    return Response(data, media_type=ctype, headers=headers)
+
+
 # ---------------------------------------------------------------- static files
 
 
@@ -1073,6 +1132,7 @@ def create_app(
         Route("/dashboards/{slug}", api_dashboard, methods=["GET"]),
         Route("/query", api_query, methods=["POST"]),
         Route("/rev", api_rev, methods=["GET"]),
+        Route("/styles", api_styles, methods=["GET"]),
         Route("/signin", api_signin_settings, methods=["GET"]),
         Route("/signin/password", api_password_switch, methods=["POST"]),
         Route("/passkeys/options", api_passkey_options, methods=["POST"]),
@@ -1086,6 +1146,7 @@ def create_app(
         Mount("/api", routes=api),
         Route("/", page_index, methods=["GET"]),
         Route("/assets/{path:path}", page_asset, methods=["GET"]),
+        Route("/ui/{path:path}", page_ui_file, methods=["GET"]),
         Route("/{path:path}", page_other, methods=["GET"]),
     ]
     app = Starlette(

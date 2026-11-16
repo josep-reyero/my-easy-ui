@@ -22,7 +22,12 @@ The folder::
     <out>/assets/easyui-export.js      the renderer as one classic script (works when opened from a file)
     <out>/assets/style.css, icon.svg
     <out>/assets/vendor/echarts.min.js (+ its licence and notice)
+    <out>/ui/theme.css, ui/styles/*.css, ui/assets/...   the project's look (theme, stylesheets, fonts and
+                                       pictures), exactly as the server serves them, when it has one
     <out>/.easyui-export               a marker, so --force only ever replaces an earlier export
+
+The look is never locked by ``--encrypt`` (a page can only use stylesheets, fonts and pictures that are
+files); the command says which of these files the copy holds.
 
 The page loads nothing from anywhere else and makes no network request (its
 Content-Security-Policy says ``connect-src 'none'``). It works from any
@@ -71,7 +76,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from easyui import paths, spec
+from easyui import paths, spec, styles
 from easyui.appconfig import AppConfig
 from easyui.errors import EasyUIError, NotFound, Refused, UsageError
 
@@ -230,6 +235,22 @@ def _source(config: AppConfig, *, working: bool, fixture: bool) -> tuple[Any, An
     return PublishedSource(config), None
 
 
+def _look(config: AppConfig, source: Any, *, working: bool) -> styles.StyleSet:
+    """The theme, stylesheets and assets that go into the copy."""
+    if working:
+        checked = styles.check(styles.read_style_dir(config.app_dir / "ui"))
+        if not checked.ok:
+            first = checked.errors[0]
+            raise Refused(
+                f"The look of the dashboards has a mistake ({first['file']}: {first['problem']}), so no copy was made.",
+                hint="Fix it (easy-ui validate shows every problem), then export again.",
+                code="export_look_invalid",
+            )
+        return checked.styles or styles.EMPTY
+    get = getattr(source, "styles", None)
+    return get() if callable(get) else styles.EMPTY
+
+
 def _used_queries(compiled: dict[str, Any]) -> list[str]:
     seen: dict[str, None] = {}
     for row in compiled.get("layout") or []:
@@ -248,6 +269,7 @@ def build_payload(
     source: Any,
     today: _dt.date | None = None,
     picture: bool = False,
+    look: styles.StyleSet | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     today = today or _dt.date.today()
     values = values or {}
@@ -267,6 +289,7 @@ def build_payload(
         chosen = known
     if not chosen:
         raise NotFound("There are no dashboards to export.", hint="Publish them first with: easy-ui publish")
+    look = look if look is not None else styles.EMPTY
     used_names: set[tuple[str | None, str]] = set()
     bundle_path = source.bundle_path()
     payload: dict[str, Any] = {
@@ -277,6 +300,7 @@ def build_payload(
         "dashboards": [],
         "specs": {},
         "data": {},
+        "styles": look.public(),
     }
     visible: list[dict[str, Any]] = []
     for slug in chosen:
@@ -383,7 +407,7 @@ def _prepare_out(out: Path, force: bool) -> None:
             raise Refused(f"{out} exists and is not a folder, so nothing was written.", hint="Choose a new folder for the export.")
         entries = list(out.iterdir())
         # --force replaces only an earlier export: the marker, and nothing but what an export writes.
-        ours = {e.name for e in entries} <= {MARKER, "index.html", "assets"} and (out / MARKER).is_file() and not any(
+        ours = {e.name for e in entries} <= {MARKER, "index.html", "assets", "ui"} and (out / MARKER).is_file() and not any(
             e.is_symlink() for e in entries)
         if entries and not (force and ours):
             raise Refused(
@@ -394,7 +418,7 @@ def _prepare_out(out: Path, force: bool) -> None:
             )
 
 
-def _write_tree(tmp: Path, html: str, js: str, web_dir: Path) -> list[str]:
+def _write_tree(tmp: Path, html: str, js: str, web_dir: Path, look: styles.StyleSet | None = None) -> list[str]:
     files = []
 
     def put(rel: str, data: bytes) -> None:
@@ -410,6 +434,8 @@ def _write_tree(tmp: Path, html: str, js: str, web_dir: Path) -> list[str]:
         put(f"assets/{name}", (web_dir / "assets" / name).read_bytes())
     for name in VENDOR:
         put(f"assets/vendor/{name}", (web_dir / "assets" / "vendor" / name).read_bytes())
+    for rel, data in (look.files() if look is not None else {}).items():
+        put(f"ui/{rel}", data)
     put(MARKER, b"Made by easy-ui export. easy-ui export --force may replace this folder.\n")
     return files
 
@@ -432,8 +458,9 @@ def export(
     _prepare_out(out, force)
     source, prepared = _source(config, working=working, fixture=fixture)
     try:
+        look = _look(config, source, working=working or fixture)
         payload, visible = build_payload(config, dashboards=dashboards, values=values, source=source, today=today,
-                                         picture=picture)
+                                         picture=picture, look=look)
     finally:
         if prepared is not None:
             prepared.close()
@@ -449,7 +476,7 @@ def export(
     tmp = Path(tempfile.mkdtemp(prefix=".easyui-export-", dir=out.parent))
     try:
         os.chmod(tmp, 0o755)
-        files = _write_tree(tmp, html, js, web_dir)
+        files = _write_tree(tmp, html, js, web_dir, look)
         if out.exists():
             old = out.parent / f".easyui-export-old-{secrets.token_hex(4)}"
             os.rename(out, old)
@@ -471,6 +498,7 @@ def export(
         "source": "working files" if (working or fixture) else "published",
         "dashboards": [d["slug"] for d in visible],
         "visible": visible,
+        "look": sorted(f for f in files if f.startswith("ui/")),
         "bytes": size,
     }
 
@@ -488,6 +516,10 @@ def _visible_lines(res: dict[str, Any]) -> list[str]:
         for q in d["queries"]:
             cut = ", cut short" if q["truncated"] else ""
             lines.append(f"    {q['rows']} row(s) of {', '.join(q['columns'])}{cut}")
+    look = res.get("look") or []
+    if look:
+        locked = " These are not locked, even with --encrypt: anyone with the files can see them." if res["encrypted"] else ""
+        lines.append(f"  The look: {', '.join(look[:10])}{' and more' if len(look) > 10 else ''}.{locked}")
     lines.append("No SQL, no tables and nothing of the sign-in are in the copy.")
     return lines
 

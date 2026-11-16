@@ -1,0 +1,44 @@
+# easy-ui ready-made theme. Copy it with: easy-ui theme use harbour
+name: Harbour
+description: A chart room. Chalk blue and navy with brass and coral, didone headings, charts set straight on the page.
+
+colors:
+  accent: "#1d4f86"
+  background: "#eaf0f4"
+  surface: "#f6f9fb"
+  text: "#13263b"
+  muted: "#4d6074"
+  border: "#c9d6e0"
+  grid: "#dbe4eb"
+  good: "#1e7a5a"
+  bad: "#b23a2c"
+  chart: ["#1d4f86", "#b07f24", "#c9573f", "#2f8484", "#6a5a9c"]
+
+dark:
+  accent: "#8db8ea"
+  background: "#0d1724"
+  surface: "#13202f"
+  text: "#e7eef5"
+  muted: "#9aacbf"
+  border: "#243447"
+  grid: "#1c2b3b"
+  good: "#7cd0b0"
+  bad: "#f2998b"
+  chart: ["#8db8ea", "#e2b866", "#f19884", "#73c7c4", "#b3a5e6"]
+
+fonts:
+  body: geometric
+  headings: didone
+  numbers: transitional
+
+type:
+  size: 16
+  scale: 1.3
+radius: 10
+density: normal
+cards: plain
+chart:
+  line_width: 1.75
+  grid: solid
+  area_opacity: 0.14
+  bar_radius: 1

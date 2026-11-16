@@ -1,0 +1,41 @@
+# easy-ui ready-made theme. Copy it with: easy-ui theme use almanac
+# Every setting is optional; see them all with: easy-ui style-guide
+name: Almanac
+description: easy-ui's own look, written out. Misty neutrals, one calm blue, a book serif for headings.
+
+colors:
+  accent: "#3d6fb6"
+  background: "#f3f5f7"
+  surface: "#ffffff"
+  text: "#1a212b"
+  muted: "#5a6472"
+  border: "#dde2e8"
+  grid: "#e9ecf0"
+  good: "#2f6f4f"
+  bad: "#a8321f"
+
+dark:
+  accent: "#7ea6e0"
+  background: "#161a20"
+  surface: "#1d222a"
+  text: "#e8ebef"
+  muted: "#a0a9b5"
+  border: "#2e353f"
+  grid: "#272d36"
+  good: "#7fc8a0"
+  bad: "#f19a86"
+
+fonts:
+  body: system-sans
+  headings: book
+  numbers: system-sans
+
+type:
+  size: 16
+  scale: 1.25
+radius: 14
+density: normal
+cards: flat
+chart:
+  line_width: 2
+  grid: solid
