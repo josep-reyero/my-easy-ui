@@ -72,10 +72,11 @@ def test_compiled_form():
     assert c["params"][1]["options"] == [{"value": "day", "label": "Day"}, {"value": "week", "label": "Week"}]
     assert c["queries"] == {"totals": {"params": ["since"]}, "daily": {"params": ["period", "since"]}, "heart": {"params": ["since"]}}
     controls, stats, charts, text_row = c["layout"]
-    assert controls == [{"id": "r0c0", "type": "controls", "title": None, "params": ["since", "period"], "class": None}]
+    assert controls == [{"id": "r0c0", "type": "controls", "title": None, "params": ["since", "period"], "class": None,
+                         "app": None}]
     assert stats[0] == {
         "id": "r1c0", "type": "stat", "title": "Distance", "query": "totals", "value": "distance",
-        "format": "distance", "delta": None, "delta_format": None, "better": None, "hint": "Walking, running and riding together.", "class": None,
+        "format": "distance", "delta": None, "delta_format": None, "better": None, "hint": "Walking, running and riding together.", "class": None, "app": None,
     }
     assert charts[0]["y"] == ["Distance"] and charts[0]["stacked"] is False
     assert charts[1]["unit"] == "bpm" and charts[1]["format"] is None
@@ -130,7 +131,7 @@ def test_unknown_component_setting():
     e = one_error(MINIMAL.replace("query: q", "querry: q"))
     assert e.where == "layout[0][0].querry" and e.did_you_mean == "query"
     assert e.allowed == ["type", "title", "query", "x", "y", "format", "unit", "step", "readout", "partial",
-                         "id", "class"]
+                         "id", "class", "app"]
 
 
 def test_missing_required_setting():

@@ -12,7 +12,7 @@
 
 import { h, fill } from "./dom.js";
 import { api, describe } from "./api.js";
-import { Stat, Table, TextBlock, Controls, componentProps } from "./components.js";
+import { Stat, Table, TextBlock, Controls, componentProps, APP_NAME } from "./components.js";
 import { Chart } from "./charts.js";
 import { applyOverrides, isDark, onThemeChange } from "./theme.js";
 import { builtinStylesheet } from "./look.js";
@@ -278,6 +278,9 @@ export class DashboardView {
     this.initParams(spec, initial);
 
     this.article.dataset.dashboard = String(spec.slug || "");
+    // An app's own dashboard: that app's (scoped) stylesheets apply to everything in it.
+    if (typeof spec.app === "string" && APP_NAME.test(spec.app)) this.article.dataset.app = spec.app;
+    else delete this.article.dataset.app;
     document.documentElement.dataset.dashboard = String(spec.slug || "");
     applyOverrides(this.article, spec.theme);
     this.titleEl.textContent = spec.title || spec.slug;
@@ -288,6 +291,9 @@ export class DashboardView {
     const rows = (spec.layout || []).map((row, r) => {
       const parts = row.map((comp) => this.make(comp, ctx));
       const types = row.map((c) => c.type);
+      // A row that one app added (all its components come from that app) is marked as the app's, too.
+      const apps = new Set(row.map((c) => (typeof c.app === "string" && APP_NAME.test(c.app) ? c.app : "")));
+      const rowApp = apps.size === 1 ? [...apps][0] : "";
       const el = h("div", {
         class: [
           "row",
@@ -295,7 +301,7 @@ export class DashboardView {
           types.every((t) => t === "stat") ? "row-stats" : null,
           types.includes("controls") ? "row-controls" : null,
         ],
-        dataset: { row: r + 1 },
+        dataset: rowApp ? { row: r + 1, app: rowApp } : { row: r + 1 },
       }, parts.map((p) => p.el));
       const basis = Math.max(...types.map((t) => BASIS[t] || 18));
       el.style.setProperty("--basis", `${basis}rem`);

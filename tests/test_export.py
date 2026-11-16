@@ -52,8 +52,10 @@ def test_plain_export_contents(published, tmp_path):
     assert res["files"] == sorted([
         ".easyui-export", "assets/easyui-export.js", "assets/icon.svg", "assets/style.css",
         "assets/vendor/echarts.LICENSE.txt", "assets/vendor/echarts.NOTICE.txt", "assets/vendor/echarts.min.js",
-        "index.html",
+        "index.html", "ui/apps/demo-sleep/styles/sleep.css",
     ])
+    assert res["look"] == ["ui/apps/demo-sleep/styles/sleep.css"]  # the sleep app's stylesheet, scoped to its part
+    assert b'[data-app="demo-sleep"]' in (out / "ui/apps/demo-sleep/styles/sleep.css").read_bytes()
     assert res["dashboards"] == ["overview", "activities"] and res["fragment"] is None
     p = payload_of(out)
     assert set(p["specs"]) == set(p["data"]) == {"overview", "activities"}
@@ -125,7 +127,7 @@ def test_encrypted_export_holds_no_readable_data(published, tmp_path):
     text = all_text(out)
     key_text = frag[3:]
     assert key_text not in text
-    for word in ("Overview", "Activities", "Demo app", "Resting heart rate", "distance_m", "run"):
+    for word in ("Overview", "Activities", "Demo project", "Resting heart rate", "distance_m", "run"):
         assert not re.search(rf"\b{re.escape(word)}\b", (out / "index.html").read_text()), word
     box = payload_of(out)
     assert box["enc"] == "A256GCM" and set(box) == {"v", "enc", "iv", "ct"}

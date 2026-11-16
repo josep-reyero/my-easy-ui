@@ -81,7 +81,7 @@ from easyui.errors import EasyUIError, NotFound, ParamError, QueryTimeout, SpecE
 SPEC_VERSION = "easy-ui/v1"
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}\Z")
 NAME_RE = sandbox.PARAM_NAME_RE
-TOP_KEYS = ("spec", "title", "description", "params", "queries", "layout", "theme")
+TOP_KEYS = ("spec", "title", "description", "params", "queries", "layout", "theme", "app")
 REQUIRED_TOP = ("spec", "title", "layout")
 PARAM_TYPES: dict[str, tuple[str, ...]] = {
     "choice": ("type", "label", "default", "options"),
@@ -165,7 +165,14 @@ _CLASS = Setting(
     "classes",
     "Space-separated names of your own for stylesheets (lowercase letters, digits and -, not starting with eui-).",
 )
+_APP = Setting(
+    "app_name",
+    "The app this component comes from. easy-ui sets it on the sections an app adds to a dashboard, so the app's "
+    "own stylesheets apply to them; set it yourself only to let an app's stylesheets style this component.",
+)
 COMPONENT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,40}\Z")
+APP_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}\Z")
+ANCHOR_RE = SLUG_RE
 _AUTO_ID_RE = re.compile(r"^r\d+c\d+\Z")
 MAX_CLASSES = 8
 _Y = Setting(
@@ -254,6 +261,7 @@ COMPONENTS: dict[str, dict[str, Any]] = {
 for _c in COMPONENTS.values():
     _c["settings"]["id"] = _ID
     _c["settings"]["class"] = _CLASS
+    _c["settings"]["app"] = _APP
 COMPONENT_TYPES = tuple(COMPONENTS)
 
 _KIND_TEXT = {
@@ -276,6 +284,7 @@ _KIND_TEXT = {
     "phone": "cards or scroll",
     "component_id": "lowercase letters, digits and -, starting with a letter (up to 41)",
     "classes": f"up to {MAX_CLASSES} space-separated names of lowercase letters, digits and -",
+    "app_name": "an app's name (lowercase letters, digits and -)",
 }
 
 EXAMPLE = """\
@@ -321,6 +330,22 @@ def catalog() -> dict[str, Any]:
             "layout": "required, a list of rows; each row is a list of up to 6 components",
             "theme": "optional, this dashboard's own look: the settings of ui/theme.yaml except name, description "
             "and font_files (see: easy-ui style-guide)",
+            "app": "set by easy-ui on an app's dashboard (the app it comes from, whose stylesheets apply to it)",
+        },
+        "anchors": "a layout item {anchor: <name>} in place of a row marks where apps' sections may be placed "
+        "(position: after:<name>); it shows nothing",
+        "sections": {
+            "spec": "easy-ui/sections-v1",
+            "file": "dashboards/<file>.yaml in an app's folder (or ui/sections/<app>.<dashboard>.yaml in the project "
+            "to replace it)",
+            "keys": ["spec", "sections"],
+            "section_keys": ["id", "position", "queries", "layout"],
+            "position": "start | end | after:<anchor>",
+            "rules": [
+                "at most 10 sections per file, 10 queries and 10 rows per section",
+                "query names start with the app's table prefix (the short name with - as _, then _)",
+                "sections cannot declare params; their queries may use the target dashboard's params",
+            ],
         },
         "names": "param and query names: lowercase letters, digits and _, starting with a letter (up to 31)",
         "params": {
@@ -415,9 +440,22 @@ _ORDINAL = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "
 
 
 def plain_place(path: tuple[Any, ...], data: Any = None) -> str | None:
-    """A place in a dashboard file in words: 'row 2, first component (line), setting y'."""
+    """A place in a dashboard file in words: 'row 2, first component (line), setting y'.
+
+    In a sections file (``sections[0].layout[1][0]``) it starts with the section: 'section "walks", row 2, ...'.
+    """
     if not path:
         return None
+    if path[0] == "sections" and len(path) >= 2 and isinstance(path[1], int):
+        sec = None
+        try:
+            sec = data["sections"][path[1]]
+        except (KeyError, IndexError, TypeError):
+            sec = None
+        sid = sec.get("id") if isinstance(sec, dict) else None
+        head_text = f'section "{sid}"' if isinstance(sid, str) and len(sid) < 45 else f"section {path[1] + 1}"
+        rest = plain_place(tuple(path[2:]), sec) if len(path) > 2 else None
+        return f"{head_text}, {rest}" if rest else head_text
     head = path[0]
     if head == "layout" and len(path) >= 2 and isinstance(path[1], int):
         parts = [f"row {path[1] + 1}"]
@@ -467,10 +505,13 @@ def _closest(word: Any, options: list[str] | tuple[str, ...]) -> str | None:
 
 
 class _Ctx:
-    def __init__(self, file: str, lines: dict[tuple[Any, ...], int], data: Any = None) -> None:
+    """Collects problems. ``origin`` (composed dashboards) maps a path to (file, path in that file, its data)."""
+
+    def __init__(self, file: str, lines: dict[tuple[Any, ...], int], data: Any = None, origin: Any = None) -> None:
         self.file = file
         self.lines = lines
         self.data = data
+        self.origin = origin
         self.errors: list[Problem] = []
         self.warnings: list[Problem] = []
 
@@ -485,8 +526,11 @@ class _Ctx:
     def _p(self, path, message, hint, allowed, got, level) -> Problem:
         allowed_list = list(allowed) if allowed is not None else None
         did = _closest(got, [str(a) for a in allowed_list]) if allowed_list and got is not None else None
-        return Problem(self.file, _where(path), message, self.line(path), hint, allowed_list, did, level,
-                       plain_place(tuple(path), self.data))
+        file, where_path, data = self.file, tuple(path), self.data
+        if self.origin is not None:
+            file, where_path, data = self.origin(tuple(path))
+        return Problem(file, _where(where_path), message, self.line(path), hint, allowed_list, did, level,
+                       plain_place(where_path, data))
 
     def err(self, path, message, *, hint=None, allowed=None, got=None) -> None:
         self.errors.append(self._p(path, message, hint, allowed, got, "error"))
@@ -822,6 +866,8 @@ class Dashboard:
     column_refs: list[tuple[tuple[Any, ...], str, str]] = field(default_factory=list)
     lines: dict[tuple[Any, ...], int] = field(default_factory=dict, repr=False)
     theme: dict[str, dict[str, str]] | None = None  # this dashboard's theme: as custom properties
+    app: str | None = None  # the app the dashboard comes from (its stylesheets apply to it)
+    origin: Any = field(default=None, repr=False)  # composed dashboards: path -> (file, path, data) of the source
 
     def query(self, name: str) -> Query:
         q = self.queries.get(name) if isinstance(name, str) else None
@@ -1140,6 +1186,12 @@ def _check_setting(ctx: _Ctx, path, kind: str, s: Setting, v: Any, ctype: str, d
             ctx.err(path, f"{what} must be a number above 0.", hint="For example step: 5000 for a line every 5 km of metres.")
             return _BAD
         return v
+    if kind == "app_name":
+        if not isinstance(v, str) or not APP_NAME_RE.match(v):
+            ctx.err(path, f"app is {str(v)[:45]!r}, which is not an app's name.",
+                    hint="Use the name of one of the project's apps (lowercase letters, digits and -), or remove it.")
+            return _BAD
+        return v
     if kind == "component_id":
         if not isinstance(v, str) or not COMPONENT_ID_RE.match(v):
             ctx.err(path, f"id is {str(v)[:45]!r}, which cannot be used as a component's name.",
@@ -1331,8 +1383,25 @@ def _check(text: str, *, slug: str, file: str = "<text>") -> tuple[Dashboard | N
     except _YamlProblem as e:
         ctx.errors.append(Problem(file, "", e.message, e.line, e.hint))
         return None, None, ctx.errors, ctx.warnings
-    ctx.lines = lines
-    ctx.data = data
+    return _check_data(data, lines, slug=slug, file=file)
+
+
+def check_data(data: Any, lines: dict[tuple[Any, ...], int], *, slug: str, file: str,
+               origin: Any = None) -> tuple[Dashboard | None, Dashboard | None, list[Problem], list[Problem]]:
+    """Check an already-parsed dashboard (composition uses it): (dashboard, partial, errors, warnings).
+
+    ``origin(path) -> (file, path, data)`` names, for each place, the file it came from (problems then point there).
+    """
+    if not isinstance(slug, str) or not SLUG_RE.match(slug):
+        ctx = _Ctx(file, {})
+        ctx.err((), f"The dashboard name {slug!r} cannot be used as a page address.", hint="Use lowercase letters, digits and -.")
+        return None, None, ctx.errors, ctx.warnings
+    return _check_data(data, lines, slug=slug, file=file, origin=origin)
+
+
+def _check_data(data: Any, lines: dict[tuple[Any, ...], int], *, slug: str, file: str,
+                origin: Any = None) -> tuple[Dashboard | None, Dashboard | None, list[Problem], list[Problem]]:
+    ctx = _Ctx(file, lines, data, origin)
     if not isinstance(data, dict):
         ctx.err((), "The file must be a set of settings (spec:, title:, queries:, layout: ...).", hint=f"Start from this example:\n{EXAMPLE}")
         return None, None, ctx.errors, ctx.warnings
@@ -1352,6 +1421,12 @@ def _check(text: str, *, slug: str, file: str = "<text>") -> tuple[Dashboard | N
         description = _text(ctx, ("description",), data["description"], limit=LIMITS["long_text_length"], what="The description")
         if description is _BAD:
             description = None
+
+    app_name = data.get("app")
+    if app_name is not None and (not isinstance(app_name, str) or not APP_NAME_RE.match(app_name)):
+        ctx.err(("app",), f"app is {str(app_name)[:45]!r}, which is not an app's name.",
+                hint="easy-ui sets app: on the dashboards an app ships; remove the line from your own dashboards.")
+        app_name = None
 
     # theme: this dashboard's own look (easyui.theme)
     theme_tokens = None
@@ -1434,8 +1509,25 @@ def _check(text: str, *, slug: str, file: str = "<text>") -> tuple[Dashboard | N
         else:
             if len(raw_layout) > LIMITS["rows"]:
                 ctx.err(("layout",), f"layout has more than {LIMITS['rows']} rows.", hint="Split it into several dashboards.")
+            anchors: set[str] = set()
             for r, row in enumerate(raw_layout):
                 rpath = ("layout", r)
+                if isinstance(row, dict) and "anchor" in row:
+                    # {anchor: name}: where apps' sections may go (composition removes it; it shows nothing)
+                    name = row.get("anchor")
+                    extra = [k for k in row if k != "anchor"]
+                    if extra:
+                        ctx.err(rpath, f"An anchor item holds only anchor: <name>, but this one also has {extra[0]!r}.",
+                                hint="Write it as - anchor: walks (on a line of its own, in place of a row).")
+                    elif not isinstance(name, str) or not ANCHOR_RE.match(name):
+                        ctx.err(rpath + ("anchor",), f"The anchor name {str(name)[:45]!r} cannot be used.",
+                                hint="Use lowercase letters, digits and -, for example anchor: activity.")
+                    elif name in anchors:
+                        ctx.err(rpath + ("anchor",), f'There are two anchors called "{name}" in this file.',
+                                hint="Give each anchor its own name.")
+                    else:
+                        anchors.add(name)
+                    continue
                 if isinstance(row, dict):
                     ctx.err(
                         rpath,
@@ -1450,10 +1542,13 @@ def _check(text: str, *, slug: str, file: str = "<text>") -> tuple[Dashboard | N
                     ctx.err(rpath, f"Row {r + 1} has {len(row)} components; at most {LIMITS['components_per_row']} fit in a row.", hint="Move some to a new row.")
                 out_row = []
                 for c, comp in enumerate(row):
-                    res = _check_component(ctx, rpath + (c,), comp, dash_ctx, refs, r, c)
+                    res = _check_component(ctx, rpath + (c,), comp, dash_ctx, refs, len(layout), c)
                     if res is not None:
                         out_row.append(res)
                 layout.append(out_row)
+            if not layout and anchors:
+                ctx.err(("layout",), "The layout has only anchors, so the page would be empty.",
+                        hint="Add at least one row of components (anchors only mark where apps' sections go).")
 
     if ctx.errors:
         # What could be checked so far: lets validation also check the data of the parts that are fine,
@@ -1461,7 +1556,7 @@ def _check(text: str, *, slug: str, file: str = "<text>") -> tuple[Dashboard | N
         partial = Dashboard(
             slug=slug, title=title if isinstance(title, str) else slug, description=description, params=params,
             queries=queries, layout=layout, file=file, warnings=[], column_refs=refs, lines=lines,
-            theme=theme_tokens,
+            theme=theme_tokens, app=app_name, origin=origin,
         )
         return None, partial, ctx.errors, ctx.warnings
 
@@ -1492,6 +1587,8 @@ def _check(text: str, *, slug: str, file: str = "<text>") -> tuple[Dashboard | N
         column_refs=refs,
         lines=lines,
         theme=theme_tokens,
+        app=app_name,
+        origin=origin,
     )
     return dash, dash, ctx.errors, ctx.warnings
 
@@ -1593,7 +1690,7 @@ def _variations(dash: Dashboard, q: Query, base: dict[str, Any]) -> list[tuple[s
 def check_with_data(
     dash: Dashboard, bundle_path: str | Path, *, limits: sandbox.Limits = sandbox.DEFAULT_LIMITS, vary: bool = True
 ) -> tuple[list[Problem], list[Problem]]:
-    ctx = _Ctx(dash.file, dash.lines)
+    ctx = _Ctx(dash.file, dash.lines, origin=dash.origin)
     values = default_values(dash)
     cols: dict[str, list[str]] = {}
     started = time.monotonic()
@@ -1657,34 +1754,67 @@ def validate_file(path: str | Path, *, bundle: str | Path | None = None, file_la
     return entry
 
 
-def validate_app(config: Any, files: list[str | Path] | None = None, *, check_data: bool = True) -> dict[str, Any]:
-    from easyui import bundle as _bundle
+def _validate_any_file(path: Path, *, bundle: Path | None, label: str) -> dict[str, Any]:
+    """One file named on the command line: a dashboard, or a sections file (checked on its own)."""
+    try:
+        head = path.read_bytes()[:4096].decode("utf-8", "replace")
+    except OSError:
+        head = ""
+    if re.search(r"^spec:\s*['\"]?easy-ui/sections-v1", head, re.M):
+        from easyui import compose  # noqa: PLC0415
 
-    notes: list[str] = []
-    if files:
-        targets = [Path(f) for f in files]
-    else:
-        d = config.dashboards_dir
-        targets = sorted(d.glob("*.yaml")) if d.is_dir() else []
-        stray = sorted(d.glob("*.yml")) if d.is_dir() else []
-        if stray:
-            notes.append(f"Files ending in .yml are ignored ({', '.join(s.name for s in stray)}); rename them to .yaml.")
-        if not targets:
-            notes.append("There are no dashboards yet in ui/dashboards/. Create one, e.g. ui/dashboards/overview.yaml (see: easy-ui components).")
-        slugs = {t.stem for t in targets}
-        missing = [d for d in getattr(config, "dashboards", ()) if d not in slugs]
-        if missing and targets:
-            notes.append(
-                f"project.toml lists {', '.join(missing)} under [ui] dashboards, but there is no such file in ui/dashboards/, "
-                "so it is left out of the menu. Fix the name in project.toml or add the file."
-            )
+        entry: dict[str, Any] = {"file": label, "slug": None, "title": None, "ok": False, "errors": [], "warnings": [],
+                                 "kind": "sections"}
+        try:
+            text = _read(path)
+        except EasyUIError as e:
+            entry["errors"] = [Problem(label, "", e.message, None, e.hint).to_dict()]
+            return entry
+        entry["errors"], entry["warnings"] = compose.check_sections_text(text, file=label)
+        entry["ok"] = not entry["errors"]
+        return entry
+    return validate_file(path, bundle=bundle, file_label=label)
+
+
+def validate_app(config: Any, files: list[str | Path] | None = None, *, check_data: bool = True) -> dict[str, Any]:
+    """The project's dashboards as composed from the project and its apps (or only ``files``), checked.
+
+    Without ``files``, every dashboard is composed first (``easyui.compose``) and each entry says where it came
+    from (``from``, ``replaces``, ``sections``); problems name the file each part came from.
+    """
+    from easyui import bundle as _bundle
+    from easyui import compose  # noqa: PLC0415
+
     current = _bundle.current_bundle(config) if check_data else None
     data = {"checked": current is not None, "bundle": current.stem if current else None, "note": None}
     if check_data and current is None:
         data["note"] = "Queries and column names were not checked against data, because no data has been built yet. Run: easy-ui data build"
     elif not check_data:
         data["note"] = "Checking against data was switched off."
-    entries = [validate_file(t, bundle=current, file_label=paths.display_path(t, config.app_dir)) for t in targets]
+    notes: list[str] = []
+    if files:
+        entries = [_validate_any_file(Path(f), bundle=current, label=paths.display_path(Path(f), config.app_dir))
+                   for f in files]
+        order: list[str] = []
+    else:
+        comp = compose.compose(config, bundle_path=current)
+        notes += comp.notes
+        entries = []
+        for d in comp.dashboards:
+            entries.append({"file": d.file, "slug": d.slug, "title": d.title, "ok": d.ok, "errors": d.errors,
+                            "warnings": d.warnings, "from": d.origin, "replaces": d.replaces,
+                            "sections": d.sections})
+        by_file: dict[str, dict[str, Any]] = {}
+        for p in comp.problems + comp.warnings:
+            e = by_file.setdefault(p["file"], {"file": p["file"], "slug": None, "title": None, "ok": True,
+                                                "errors": [], "warnings": []})
+            (e["errors"] if p.get("level") == "error" else e["warnings"]).append(p)
+            e["ok"] = not e["errors"]
+        entries += list(by_file.values())
+        order = comp.order
+        if not comp.dashboards and not comp.problems:
+            notes.append("There are no dashboards yet: add one in ui/dashboards/ (for example ui/dashboards/overview.yaml, "
+                         "see: easy-ui components), or an app that ships dashboards.")
     n_err = sum(len(e["errors"]) for e in entries)
     n_warn = sum(len(e["warnings"]) for e in entries)
     return {
@@ -1692,6 +1822,7 @@ def validate_app(config: Any, files: list[str | Path] | None = None, *, check_da
         "app": config.name,
         "data": data,
         "dashboards": entries,
+        "order": order,
         "errors": n_err,
         "warnings": n_warn,
         "notes": notes,
@@ -1775,6 +1906,7 @@ def compile_dashboard(dash: Dashboard, *, today: _dt.date | None = None) -> dict
         "queries": {name: {"params": list(dash.queries[name].params)} for name in used},
         "layout": copy.deepcopy(dash.layout),
         "theme": copy.deepcopy(dash.theme),
+        "app": dash.app,
     }
 
 

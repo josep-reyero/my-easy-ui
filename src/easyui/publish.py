@@ -120,7 +120,9 @@ MAX_NOTE_LENGTH = 200
 MAX_MANIFEST_BYTES = 1_000_000
 MAX_ARCHIVE_BYTES = 8_000_000
 MAX_ARCHIVE_UNPACKED_BYTES = 32_000_000
-MAX_ARCHIVE_MEMBERS = MAX_DASHBOARDS + 8 + 1 + styles.MAX_STYLESHEETS + styles.MAX_ASSETS + 12
+MAX_APPS = 16
+MAX_STYLE_FILES = 1 + (MAX_APPS + 1) * (styles.MAX_STYLESHEETS + styles.MAX_ASSETS)
+MAX_ARCHIVE_MEMBERS = MAX_DASHBOARDS + 8 + MAX_STYLE_FILES + 12 + 4 * MAX_APPS
 VERSION_RE = re.compile(r"^[1-9][0-9]{0,8}\Z")
 _LINK_RE = re.compile(r"^versions/([1-9][0-9]{0,8})\Z")
 _TMP_PREFIX = ".tmp-"
@@ -228,8 +230,12 @@ def _read_regular_at(dir_fd: int, name: str, label: str) -> bytes | dict[str, An
         os.close(fd)
 
 
-def read_dashboard_dir(directory: Path, *, label_prefix: str = "") -> tuple[list[SourceFile], list[dict[str, Any]], list[str]]:
-    """Every ``<slug>.yaml`` in ``directory``: (files, problems, notes). Never follows links."""
+def read_dashboard_dir(directory: Path, *, label_prefix: str = "",
+                       name_re: re.Pattern[str] = spec.SLUG_RE) -> tuple[list[SourceFile], list[dict[str, Any]], list[str]]:
+    """Every ``<slug>.yaml`` in ``directory``: (files, problems, notes). Never follows links.
+
+    ``name_re`` is what a file name without ``.yaml`` must match (``ui/sections/`` uses ``<app>.<dashboard>``).
+    """
     files: list[SourceFile] = []
     problems: list[dict[str, Any]] = []
     notes: list[str] = []
@@ -263,11 +269,16 @@ def read_dashboard_dir(directory: Path, *, label_prefix: str = "") -> tuple[list
         for name in candidates:
             label = f"{shown}{name}"
             slug = name[: -len(".yaml")]
-            if not spec.SLUG_RE.match(slug):
-                problems.append(_problem(
-                    label, f'The file name "{name}" cannot be used, because its name becomes the page address.',
-                    "Name it <slug>.yaml with lowercase letters, digits and - (up to 41 characters, starting with a "
-                    "letter or digit), for example training-overview.yaml."))
+            if not name_re.match(slug):
+                if name_re is spec.SLUG_RE:
+                    problems.append(_problem(
+                        label, f'The file name "{name}" cannot be used, because its name becomes the page address.',
+                        "Name it <slug>.yaml with lowercase letters, digits and - (up to 41 characters, starting with "
+                        "a letter or digit), for example training-overview.yaml."))
+                else:
+                    problems.append(_problem(
+                        label, f'The file name "{name}" does not say which app and dashboard it is for.',
+                        "Name it <app name>.<dashboard>.yaml, for example fitlab-walks.overview.yaml."))
                 continue
             got = _read_regular_at(dir_fd, name, label)
             if isinstance(got, dict):
@@ -394,13 +405,18 @@ def _read_manifest(vdir: Path) -> dict[str, Any]:
     )
     if ok and "styles" in m:
         st = m["styles"]
-        ok = isinstance(st, list) and len(st) <= 1 + styles.MAX_STYLESHEETS + styles.MAX_ASSETS and all(
+        ok = isinstance(st, list) and len(st) <= MAX_STYLE_FILES and all(
             isinstance(d, dict)
             and _style_path_ok(d.get("path"))
             and isinstance(d.get("sha256"), str)
             and re.match(r"^[0-9a-f]{64}\Z", d["sha256"])
             for d in st
         ) and len({d["path"] for d in st}) == len(st)
+    if ok and "project_files" in m:
+        pf = m["project_files"]
+        ok = isinstance(pf, list) and len(pf) <= 2 * MAX_DASHBOARDS + 200 and all(
+            isinstance(d, dict) and _project_file_ok(d.get("path")) and isinstance(d.get("sha256"), str)
+            and re.match(r"^[0-9a-f]{64}\Z", d["sha256"]) for d in pf) and len({d["path"] for d in pf}) == len(pf)
     if not ok:
         raise PublishedDamaged(
             f"The description of the published {label} is damaged, so easy-ui does not use it.",
@@ -410,11 +426,17 @@ def _read_manifest(vdir: Path) -> dict[str, Any]:
 
 
 def _style_path_ok(p: Any) -> bool:
-    """A path of a published style file: theme.yaml, styles/<name>.css or assets/<a>/<b>/<file>."""
-    if not isinstance(p, str) or len(p) > 300:
+    """A path of a published style file: theme.yaml, styles/<name>.css or assets/<a>/<b>/<file>, also an app's
+    styles and assets under apps/<app name>/ (no theme there)."""
+    if not isinstance(p, str) or len(p) > 340:
         return False
     if p == "theme.yaml":
         return True
+    m = styles.APP_PATH_RE.match(p)
+    if m is not None:
+        p = m.group("rest")
+    elif p.startswith("apps/"):
+        return False
     parts = p.split("/")
     if parts[0] == "styles":
         return len(parts) == 2 and bool(styles.STYLESHEET_RE.match(parts[1]))
@@ -428,7 +450,9 @@ def _style_limit(path: str) -> int:
 
     if path == "theme.yaml":
         return theme.MAX_THEME_BYTES
-    return css.MAX_STYLESHEET_BYTES if path.startswith("styles/") else styles.MAX_ASSET_BYTES
+    m = styles.APP_PATH_RE.match(path)
+    rest = m.group("rest") if m else path
+    return css.MAX_STYLESHEET_BYTES if rest.startswith("styles/") else styles.MAX_ASSET_BYTES
 
 
 def _read_version_style(vdir: Path, entry: dict[str, Any]) -> bytes:
@@ -459,15 +483,8 @@ def _version_style_files(vdir: Path, manifest: dict[str, Any]) -> styles.StyleFi
     files = styles.StyleFiles()
     for entry in manifest.get("styles") or []:
         data = _read_version_style(vdir, entry)
-        b = styles.Blob(entry["path"], f"version {vdir.name}: {entry['path']}", data, entry["sha256"])
-        if b.path == "theme.yaml":
-            files.theme = b
-        elif b.path.startswith("styles/"):
-            files.stylesheets.append(b)
-        else:
-            files.assets.append(b)
-    files.stylesheets.sort(key=lambda b: b.path)
-    files.assets.sort(key=lambda b: b.path)
+        files.add(styles.Blob(entry["path"], f"version {vdir.name}: {entry['path']}", data, entry["sha256"]))
+    files.sort()
     return files
 
 
@@ -499,6 +516,8 @@ def _verify_version(vdir: Path) -> dict[str, Any]:
     for entry in m["dashboards"]:
         data = _read_version_file(vdir, entry)
         spec.loads(data.decode("utf-8"), slug=entry["slug"], file=f"version {vdir.name}: {entry['slug']}.yaml")
+    for entry in m.get("project_files") or []:
+        _read_project_file(vdir, entry)
     checked = styles.check(_version_style_files(vdir, m))
     if not checked.ok:
         first = checked.errors[0]
@@ -617,7 +636,16 @@ def _publish_files(
     source: str,
     notes: list[str],
     style_files: styles.StyleFiles | None = None,
+    results: list[dict[str, Any]] | None = None,
+    meta: dict[str, dict[str, Any]] | None = None,
+    project_files: list[Any] | None = None,
 ) -> dict[str, Any]:
+    """Check (unless ``results`` already holds the checks) and store ``files`` as a new version.
+
+    ``meta`` (slug -> {"from", "replaces", "sections", "sources"}) records where each composed dashboard came
+    from; ``project_files`` (``compose.Part``) are the project's own dashboard and sections files, kept in the
+    version so ``rollback --restore-files`` can put them back.
+    """
     if len(files) > MAX_DASHBOARDS:
         raise _too_many(len(files))
     if not files and not file_problems:
@@ -628,7 +656,8 @@ def _publish_files(
             code="no_dashboards",
         )
     current_bundle = bundle.require_current(st)
-    results = validate_sources(files, current_bundle)
+    if results is None:
+        results = validate_sources(files, current_bundle)
     style_files = style_files or styles.StyleFiles()
     style_check = styles.check(style_files)
     notes = [*notes, *style_check.notes]
@@ -638,11 +667,13 @@ def _publish_files(
     warnings = [w for r in results for w in r["warnings"]] + style_check.warnings
     style_entries = [{"path": b.path, "sha256": b.sha256, "size": len(b.data)} for b in style_files.blobs()]
     style_key = sorted((d["path"], d["sha256"]) for d in style_entries)
+    meta = meta or {}
     dashboards = [
         {"slug": f.slug, "title": r["title"], "description": r["description"], "file": f"dashboards/{f.slug}.yaml",
-         "sha256": f.sha256, "size": len(f.data)}
+         "sha256": f.sha256, "size": len(f.data), **meta.get(f.slug, {})}
         for f, r in zip(files, results, strict=True)
     ]
+    kept = [{"path": p.rel, "sha256": p.sha256, "size": len(p.data)} for p in project_files or []]
     with _locked(st):
         cur = current_version(st)
         if cur is not None:
@@ -680,6 +711,7 @@ def _publish_files(
             "bundle": current_bundle.stem,
             "dashboards": dashboards,
             "styles": style_entries,
+            "project_files": kept,
         }
         vd = _versions_dir(st)
         # 0750 on a server, where the web account reads the published versions through its group.
@@ -699,6 +731,7 @@ def _publish_files(
                 finally:
                     os.close(fd)
             _write_styles(staging, style_files)
+            _write_project_files(staging, project_files or [])
             mfd = os.open(staging / "manifest.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC, 0o444)
             try:
                 os.fchmod(mfd, 0o444)
@@ -756,12 +789,77 @@ def _write_styles(staging: Path, files: styles.StyleFiles) -> None:
         os.chmod(d, VERSION_DIR_MODE)
 
 
+def _write_project_files(staging: Path, parts: list[Any]) -> None:
+    """The project's own dashboard and sections files, under project/ (read-only, like everything published)."""
+    made: list[Path] = []
+    for part in parts:
+        rel = _project_file_ok(part.rel)
+        if rel is None:
+            continue
+        target = staging.joinpath("project", *rel.split("/"))
+        for parent in reversed(target.relative_to(staging).parents[:-1]):
+            d = staging / parent
+            if not d.exists():
+                d.mkdir(mode=0o700)
+                made.append(d)
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC, 0o444)
+        try:
+            os.fchmod(fd, 0o444)
+            os.write(fd, part.data)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    for d in made:
+        os.chmod(d, VERSION_DIR_MODE)
+
+
+_PROJECT_FILE_RE = re.compile(r"^ui/(?:dashboards/[a-z0-9][a-z0-9-]{0,40}|sections/[a-z][a-z0-9-]{1,30}\.[a-z0-9][a-z0-9-]{0,40})\.yaml\Z")
+
+
+def _project_file_ok(rel: Any) -> str | None:
+    return rel if isinstance(rel, str) and _PROJECT_FILE_RE.match(rel) else None
+
+
+def _read_project_file(vdir: Path, entry: dict[str, Any]) -> bytes:
+    rel = entry["path"]
+    parts = ["project", *rel.split("/")]
+    try:
+        dfd = paths.open_nofollow(vdir.joinpath(*parts[:-1]), 3 + len(parts) - 1, directory=True)
+    except OSError:
+        dfd = -1
+    got: bytes | dict[str, Any] = {}
+    if dfd >= 0:
+        try:
+            got = _read_regular_at(dfd, parts[-1], rel)
+        finally:
+            os.close(dfd)
+    if isinstance(got, dict) or _sha256(got) != entry["sha256"]:
+        raise PublishedDamaged(
+            f"The kept copy of {rel} in version {vdir.name} was changed or damaged after it was published, so "
+            "easy-ui does not use it.",
+            hint="Pick another version (see: easy-ui versions), or publish again.",
+        )
+    return got
+
+
 def _verify_version_staged(staging: Path, manifest: dict[str, Any]) -> None:
     """Read back what was written before switching (the folder is not named like a version yet)."""
     for entry in manifest["dashboards"]:
         dfd = os.open(staging / "dashboards", os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC)
         try:
             got = _read_regular_at(dfd, f"{entry['slug']}.yaml", entry["slug"])
+        finally:
+            os.close(dfd)
+        if isinstance(got, dict) or _sha256(got) != entry["sha256"]:
+            raise TemporaryFailure(
+                "The new version could not be written correctly, so nothing was published.",
+                hint="Check there is free disk space, then publish again.",
+            )
+    for entry in manifest.get("project_files") or []:
+        parts = ["project", *entry["path"].split("/")]
+        dfd = os.open(staging.joinpath(*parts[:-1]), os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC)
+        try:
+            got = _read_regular_at(dfd, parts[-1], entry["path"])
         finally:
             os.close(dfd)
         if isinstance(got, dict) or _sha256(got) != entry["sha256"]:
@@ -783,23 +881,41 @@ def _verify_version_staged(staging: Path, manifest: dict[str, Any]) -> None:
             )
 
 
+def _composed(config: AppConfig, bundle_path: Path | None, *, vary: bool = True) -> Any:
+    from easyui import compose  # noqa: PLC0415 - compose uses this module's folder reader
+
+    return compose.compose(config, bundle_path=bundle_path, vary=vary)
+
+
+def _sources_meta(d: Any) -> dict[str, Any]:
+    return {"from": d.origin, "replaces": d.replaces,
+            "sections": [{k: x[k] for k in ("app", "id", "file", "placed")} for x in d.sections],
+            "sources": list(d.sources)}
+
+
 def publish(config: AppConfig, *, note: str | None = None, keep: int = KEEP_VERSIONS, now: _dt.datetime | None = None) -> dict[str, Any]:
+    """Compose the dashboards from the project and its apps, check them against the current data and publish."""
     note = _check_note(note)
     keep = _check_keep(keep)
-    problems: list[dict[str, Any]] = []
-    for p in (config.app_dir / "ui", config.dashboards_dir):
-        if p.is_symlink():
-            problems.append(_problem(paths.display_path(p, config.app_dir), f"{paths.display_path(p, config.app_dir)} is "
-                                     "a link, so easy-ui does not read dashboards through it.",
-                                     "Make it a real folder inside the project."))
+    apps = config.apps
+    comp = _composed(config, bundle.current_bundle(config.state))
     files: list[SourceFile] = []
-    notes: list[str] = []
-    style_files = styles.StyleFiles()
-    if not problems:
-        files, problems, notes = read_dashboard_dir(config.dashboards_dir, label_prefix="ui/dashboards/")
-        style_files = styles.read_style_dir(config.app_dir / "ui")
-    result = _publish_files(config.state, config.name, files, problems, note=note, keep=keep, now=now,
-                            source="working folder", notes=notes, style_files=style_files)
+    results: list[dict[str, Any]] = []
+    for d in comp.dashboards:
+        if d.data is not None:
+            files.append(SourceFile(d.slug, f"{d.slug}.yaml", d.file, d.data, _sha256(d.data)))
+        results.append({"slug": d.slug, "file": d.file, "title": d.title, "description": d.description, "ok": d.ok,
+                        "errors": d.errors, "warnings": d.warnings, "dashboard": d.dashboard})
+    if not comp.ok:
+        raise _spec_error(results, comp.problems)
+    warnings = list(comp.warnings)
+    style_files = styles.read_project_look(config, apps)
+    result = _publish_files(config.state, config.name, files, [], note=note, keep=keep, now=now,
+                            source="working folder", notes=comp.notes, style_files=style_files, results=results,
+                            meta={d.slug: _sources_meta(d) for d in comp.dashboards},
+                            project_files=comp.project_files)
+    result["warnings"] = warnings + result["warnings"]
+    result["order"] = comp.order
     write_snapshot(config)
     return result
 
@@ -880,11 +996,26 @@ def read_archive(tar_stream: BinaryIO | bytes | bytearray) -> list[SourceFile]:
 
 
 def _style_member(rel: str) -> str | None:
-    """The style path of an archive member (theme.yaml, styles/..., assets/..., also under ui/), else None."""
+    """The style path of an archive member (theme.yaml, styles/..., assets/..., apps/<app>/styles|assets/...,
+    also under ui/), else None."""
     r = rel[3:] if rel.startswith("ui/") else rel
-    if r == "theme.yaml" or r.startswith(("styles/", "assets/")) or r in ("styles", "assets"):
+    if r == "theme.yaml" or r.startswith(("styles/", "assets/", "apps/")) or r in ("styles", "assets", "apps"):
         return r
     return None
+
+
+def _style_dir_ok(r: str) -> bool:
+    """A folder an archive may hold for the look: styles, assets and their folders, apps/<app>/..."""
+    if r in ("styles", "assets", "apps"):
+        return True
+    parts = r.split("/")
+    if parts[0] == "apps":
+        if len(parts) == 2:
+            return bool(re.match(r"^[a-z][a-z0-9-]{1,30}\Z", parts[1]))
+        if len(parts) == 3:
+            return bool(re.match(r"^[a-z][a-z0-9-]{1,30}\Z", parts[1])) and parts[2] in ("styles", "assets")
+        return _style_path_ok(r)
+    return _style_path_ok(r)
 
 
 def read_archive_parts(tar_stream: BinaryIO | bytes | bytearray) -> tuple[list[SourceFile], styles.StyleFiles]:
@@ -925,7 +1056,7 @@ def read_archive_parts(tar_stream: BinaryIO | bytes | bytearray) -> tuple[list[S
                 raise _refuse(f"the entry {shown} has an unsafe name (an absolute path, '..', or odd characters).")
             srel = _style_member(rel)
             if m.isdir() and m.type == tarfile.DIRTYPE:
-                if rel not in _ARCHIVE_DIRS and not (srel and (srel in ("styles", "assets") or _style_path_ok(srel))):
+                if rel not in _ARCHIVE_DIRS and not (srel and _style_dir_ok(srel)):
                     raise _refuse(f"it has a folder {shown}; only dashboard files are accepted.")
                 continue
             if m.type not in (tarfile.REGTYPE, tarfile.AREGTYPE) or m.linkname or m.issparse():
@@ -939,12 +1070,13 @@ def read_archive_parts(tar_stream: BinaryIO | bytes | bytearray) -> tuple[list[S
                 if srel in style_blobs:
                     raise _refuse(f"the file {srel!r} appears more than once.", "Put each file in the archive once.")
                 limit = _style_limit(srel)
-                n_assets = sum(1 for k in style_blobs if k.startswith("assets/"))
-                n_styles = sum(1 for k in style_blobs if k.startswith("styles/"))
+                owner = "/".join(srel.split("/")[:2]) + "/" if srel.startswith("apps/") else ""
+                n_assets = sum(1 for k in style_blobs if k.startswith(f"{owner}assets/"))
+                n_styles = sum(1 for k in style_blobs if k.startswith(f"{owner}styles/"))
                 if m.size > limit:
                     raise _refuse(f"{srel} is {m.size} bytes, more than the {limit} such a file may have.")
-                if srel.startswith("assets/") and n_assets >= styles.MAX_ASSETS or \
-                        srel.startswith("styles/") and n_styles >= styles.MAX_STYLESHEETS:
+                if srel.startswith(f"{owner}assets/") and n_assets >= styles.MAX_ASSETS or \
+                        srel.startswith(f"{owner}styles/") and n_styles >= styles.MAX_STYLESHEETS:
                     raise _refuse(f"it has more style files than easy-ui accepts ({styles.MAX_STYLESHEETS} stylesheets, "
                                   f"{styles.MAX_ASSETS} assets).")
                 try:
@@ -981,13 +1113,7 @@ def read_archive_parts(tar_stream: BinaryIO | bytes | bytearray) -> tuple[list[S
         raise _refuse("it has no dashboard files.", "Put the <slug>.yaml files at the top of the archive or in dashboards/.")
     style_files = styles.StyleFiles()
     for k in sorted(style_blobs):
-        b = style_blobs[k]
-        if k == "theme.yaml":
-            style_files.theme = b
-        elif k.startswith("styles/"):
-            style_files.stylesheets.append(b)
-        else:
-            style_files.assets.append(b)
+        style_files.add(style_blobs[k])
     return [files[k] for k in sorted(files)], style_files
 
 
@@ -1079,28 +1205,70 @@ def rollback(where: AppConfig | paths.StatePaths, version: int | str | None = No
 
 
 def working_matches(config: AppConfig, version: int) -> bool:
-    """True when ui/dashboards/ holds exactly the dashboards of ``version`` (so publish would not change it)."""
+    """True when the dashboards composed from the working files, and the look, are exactly those of ``version``."""
     st = config.state
     try:
         m = _read_manifest(_versions_dir(st) / str(version))
-        files, problems, _notes = read_dashboard_dir(config.dashboards_dir, label_prefix="ui/dashboards/")
+        comp = _composed(config, None, vary=False)
+        sf = styles.read_project_look(config, comp.apps)
     except (EasyUIError, OSError):
         return False
-    if problems:
+    if not comp.ok:
         return False
-    sf = styles.read_style_dir(config.app_dir / "ui")
     if sf.problems or sorted((b.path, b.sha256) for b in sf.blobs()) != sorted(
             (d["path"], d["sha256"]) for d in m.get("styles") or []):
         return False
-    return sorted((f.slug, f.sha256) for f in files) == sorted((d["slug"], d["sha256"]) for d in m["dashboards"])
+    return sorted((d.slug, d.sha256) for d in comp.dashboards) == sorted(
+        (d["slug"], d["sha256"]) for d in m["dashboards"])
+
+
+def _restore_folder(config: AppConfig, folder: str, name_re: re.Pattern[str], wanted: dict[str, bytes],
+                    stamp: str) -> tuple[list[str], list[str], str | None]:
+    """Make ui/<folder>/ hold exactly ``wanted`` (file name -> data); the others go to .before-restore-<time>/."""
+    ddir = config.app_dir / "ui" / folder
+    for p in (config.app_dir / "ui", ddir):
+        if p.is_symlink():
+            raise Refused(f"{paths.display_path(p, config.app_dir)} is a link, so easy-ui does not write through it.",
+                          hint="Make it a real folder inside the project.", code="link_refused")
+    if not wanted and not ddir.exists():
+        return [], [], None
+    ddir.mkdir(parents=True, exist_ok=True)
+    files, _problems, _notes = read_dashboard_dir(ddir, label_prefix=f"ui/{folder}/", name_re=name_re)
+    moved: list[str] = []
+    backup = ddir / f".before-restore-{stamp}"
+    for f in files:
+        if wanted.get(f.name) == f.data:
+            continue
+        backup.mkdir(mode=0o700, exist_ok=True)
+        os.replace(ddir / f.name, backup / f.name)
+        moved.append(f.name if folder == "dashboards" else f"ui/{folder}/{f.name}")
+    restored = []
+    for name, data in wanted.items():
+        target = ddir / name
+        if target.is_symlink():
+            target.unlink()
+        if target.exists() and target.read_bytes() == data:
+            continue
+        tmp = ddir / f".{name}.restore-{secrets.token_hex(4)}"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC, 0o644)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        os.replace(tmp, target)
+        restored.append(name if folder == "dashboards" else f"ui/{folder}/{name}")
+    return restored, moved, paths.display_path(backup, config.app_dir) if moved else None
 
 
 def restore_files(config: AppConfig, version: int | str | None = None, *, now: _dt.datetime | None = None) -> dict[str, Any]:
-    """Copy a published version's dashboard files back into ui/dashboards/ (default: the current version).
+    """Copy a published version's files back into the project (default: the current version).
 
-    Files there that would be replaced or that are not part of the version are first moved into
-    ``ui/dashboards/.before-restore-<time>/`` (ignored by easy-ui because the name starts with a dot), so
-    nothing is lost. Never follows links.
+    A version published from a project with apps keeps the project's own files (``ui/dashboards/`` and
+    ``ui/sections/``) as they were; those are put back. The apps' files are the apps' own and are not touched.
+    An older version (or one published from an archive) has only the dashboards: they go to ``ui/dashboards/``.
+    Files that would be replaced or that are not part of the version are first moved into
+    ``.before-restore-<time>/`` beside them (ignored by easy-ui because the name starts with a dot), so nothing is
+    lost. Never follows links.
     """
     st = config.state
     if version is None:
@@ -1115,45 +1283,29 @@ def restore_files(config: AppConfig, version: int | str | None = None, *, now: _
     if not vdir.is_dir():
         raise NotFound(f"There is no published version {version}.", hint="See the versions with: easy-ui versions")
     m = _verify_version(vdir)
-    wanted = {d["slug"]: _read_version_file(vdir, d) for d in m["dashboards"]}
-    ddir = config.dashboards_dir
-    for p in (config.app_dir / "ui", ddir):
-        if p.is_symlink():
-            raise Refused(f"{paths.display_path(p, config.app_dir)} is a link, so easy-ui does not write through it.",
-                          hint="Make it a real folder inside the project.", code="link_refused")
-    ddir.mkdir(parents=True, exist_ok=True)
-    files, _problems, _notes = read_dashboard_dir(ddir, label_prefix="ui/dashboards/")
-    moved: list[str] = []
     stamp = _now(now).strftime("%Y%m%d-%H%M%S")
-    backup = ddir / f".before-restore-{stamp}"
-    for f in files:
-        if wanted.get(f.slug) == f.data:
-            continue
-        backup.mkdir(mode=0o700, exist_ok=True)
-        os.replace(ddir / f.name, backup / f.name)
-        moved.append(f.name)
-    restored = []
-    for slug, data in wanted.items():
-        target = ddir / f"{slug}.yaml"
-        if target.is_symlink():
-            target.unlink()
-        if target.exists() and target.read_bytes() == data:
-            continue
-        tmp = ddir / f".{slug}.yaml.restore-{secrets.token_hex(4)}"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC, 0o644)
-        try:
-            os.write(fd, data)
-        finally:
-            os.close(fd)
-        os.replace(tmp, target)
-        restored.append(f"{slug}.yaml")
+    if "project_files" in m and m.get("source") != "archive":
+        kept = {e["path"]: _read_project_file(vdir, e) for e in m["project_files"]}
+        want_dash = {p.split("/", 2)[2]: d for p, d in kept.items() if p.startswith("ui/dashboards/")}
+        want_sec = {p.split("/", 2)[2]: d for p, d in kept.items() if p.startswith("ui/sections/")}
+        from easyui import compose  # noqa: PLC0415
+
+        restored, moved, backup = _restore_folder(config, "dashboards", spec.SLUG_RE, want_dash, stamp)
+        r2, m2, b2 = _restore_folder(config, "sections", compose.OVERRIDE_RE, want_sec, stamp)
+        restored += r2
+        moved += m2
+        backup = backup or b2
+    else:
+        wanted = {f"{d['slug']}.yaml": _read_version_file(vdir, d) for d in m["dashboards"]}
+        restored, moved, backup = _restore_folder(config, "dashboards", spec.SLUG_RE, wanted, stamp)
     # The theme, stylesheets and assets of the version, too (the ones there now go to ui/.before-restore-<time>/).
-    style_wanted = {b.path: b.data for b in _version_style_files(vdir, m).blobs()}
+    # The apps' own styles are theirs: only the project's part of the look is put back.
+    style_wanted = {b.path: b.data for b in _version_style_files(vdir, m).blobs() if not b.path.startswith("apps/")}
     style_backup = config.app_dir / "ui" / f".before-restore-{stamp}"
     style_restored, style_moved = styles.restore(config.app_dir / "ui", style_wanted, backup=style_backup)
     restored += style_restored
     return {"app": config.name, "version": version, "restored": restored, "set_aside": moved + style_moved,
-            "backup": paths.display_path(backup, config.app_dir) if moved else None,
+            "backup": backup,
             "styles_backup": paths.display_path(style_backup, config.app_dir) if style_moved else None}
 
 
@@ -1329,6 +1481,9 @@ def _look_text(entries: list[dict[str, Any]]) -> str:
     n = sum(1 for e in entries if e["path"].startswith("assets/"))
     if n:
         parts.append(f"{n} font or picture file{'s' if n != 1 else ''}")
+    n = sum(1 for e in entries if e["path"].startswith("apps/") and "/styles/" in e["path"])
+    if n:
+        parts.append(f"{n} app stylesheet{'s' if n != 1 else ''}")
     return (", with " + " and ".join(parts)) if parts else ""
 
 

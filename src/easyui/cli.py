@@ -206,7 +206,8 @@ def _cmd_tables(args: argparse.Namespace) -> Result:
         if not db.is_file():
             raise NotFound(
                 f"The project's data file {paths.display_path(db)} does not exist yet.",
-                hint="Run the project's job or command that creates its data first, or check [ui] data in project.toml.",
+                hint="Run the project's jobs that write its data first (with my-easy-software: mes db sync, then the "
+                "apps' rebuild jobs).",
             )
         tables = bundle.describe_tables(db, samples=samples, immutable=False)
         allowed = {t.lower() for t in cfg.tables}
@@ -214,8 +215,8 @@ def _cmd_tables(args: argparse.Namespace) -> Result:
             t["in_dashboards"] = t["name"].lower() in allowed
         data = {"app": cfg.name, "from": "app data file", "bundle": None, "tables": tables}
         intro = (
-            "Tables and views in the project's data file. Only those marked * are copied for dashboards "
-            "([ui] tables in project.toml):"
+            "Tables and views in the project's shared database. Only those marked * are copied for dashboards "
+            "(the shared tables, [views] and the apps' [ui] tables, or [ui] tables in project.toml):"
         )
     else:
         current = bundle.require_current(cfg)
@@ -268,7 +269,12 @@ def _cmd_validate(args: argparse.Namespace) -> Result:
     lines = []
     for d in report["dashboards"]:
         state = "ok" if d["ok"] else f"{len(d['errors'])} problem(s)"
-        lines.append(f"{d['file']}: {state}" + (f", {len(d['warnings'])} warning(s)" if d["warnings"] else ""))
+        made = ""
+        if d.get("slug") and d.get("from") not in (None, "project"):
+            made = f" (dashboard {d['slug']}, from the app {d['from']})"
+        if d.get("sections"):
+            made += " with sections from " + ", ".join(dict.fromkeys(x["app"] for x in d["sections"]))
+        lines.append(f"{d['file']}{made}: {state}" + (f", {len(d['warnings'])} warning(s)" if d["warnings"] else ""))
         for p in d["errors"] + d["warnings"]:
             prob = spec.Problem(
                 file=p["file"], where=p["where"], message=p["problem"], line=p.get("line"), hint=p.get("hint"),
@@ -278,12 +284,15 @@ def _cmd_validate(args: argparse.Namespace) -> Result:
     look = report.get("styles")
     if look is not None:
         f = look["files"]
-        if f["theme"] or f["stylesheets"] or f["assets"] or look["errors"]:
+        if f["theme"] or f["stylesheets"] or f["assets"] or f.get("app_stylesheets") or f.get("app_assets") \
+                or look["errors"]:
             def count(n: int, word: str) -> str:
                 return f"{n} {word}" + ("" if n == 1 else "s")
 
             parts = (["the theme"] if f["theme"] else []) + [
-                count(len(f["stylesheets"]), "stylesheet"), count(len(f["assets"]), "font or picture file")]
+                count(len(f["stylesheets"]), "stylesheet"), count(len(f["assets"]), "font or picture file"),
+                count(len(f.get("app_stylesheets") or []), "app stylesheet"),
+                count(len(f.get("app_assets") or []), "app font or picture file")]
             parts = [x for x in parts if not x.startswith("0 ")] or ["no files"]
             state = "ok" if look["ok"] else count(len(look["errors"]), "mistake") + " (nothing is published until fixed)"
             lines.append(f"The look ({', '.join(parts)}): {state}"
@@ -299,8 +308,9 @@ def _cmd_validate(args: argparse.Namespace) -> Result:
         lines.append(report["data"]["note"])
     if report["dashboards"]:
         lines.append(
-            ("All dashboards are valid" + (" and so is their look." if look and look["files"]["theme"] or look and
-                                           look["files"]["stylesheets"] else ".")) if report["ok"] else
+            ("All dashboards are valid" + (" and so is their look." if look and (look["files"]["theme"] or
+                                           look["files"]["stylesheets"] or look["files"].get("app_stylesheets"))
+                                           else ".")) if report["ok"] else
             f"Found {report['errors']} problem(s). Fix them and run easy-ui validate again."
         )
     return Result(report, "\n".join(lines), 0 if report["ok"] else 1)
@@ -380,10 +390,11 @@ def build_parser() -> tuple[ArgumentParser, list[str]]:
     lst = data_sub.add_parser("list", help="List the builds of the dashboard data.")
     lst.set_defaults(func=_cmd_data_list)
 
-    from easyui import demo, styles  # noqa: PLC0415
+    from easyui import compose, demo, styles  # noqa: PLC0415
 
     demo.register(sub)
     styles.register(sub)
+    compose.register(sub)
 
     problems: list[str] = []
     for module in COMMAND_MODULES:

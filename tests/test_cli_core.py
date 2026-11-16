@@ -113,10 +113,12 @@ def test_tables_needs_data(demo_app):
 def test_tables_from_bundle_and_source(built_app):
     code, data = run_cli_json("tables", "--samples", "1")
     assert code == 0 and data["from"] == "dashboard data"
-    assert [t["name"] for t in data["tables"]] == ["activities", "days", "weekly"]
+    assert [t["name"] for t in data["tables"]] == ["activities", "days", "sleep_nights", "weekly"]
     code, data = run_cli_json("tables", "--source")
     flags = {t["name"]: t["in_dashboards"] for t in data["tables"]}
-    assert flags == {"activities": True, "days": True, "private_notes": False, "weekly": True}
+    # The rows of the shared tables (<name>__rows) never reach dashboards: only their views do.
+    assert flags == {"activities": True, "activities__rows": False, "days": True, "days__rows": False,
+                     "private_notes": False, "sleep_nights": True, "weekly": True}
     code, out, _ = run_cli("tables", "--source")
     assert "* days" in out and "  private_notes" in out
 

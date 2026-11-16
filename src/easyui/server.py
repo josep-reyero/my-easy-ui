@@ -69,7 +69,7 @@ never taken from the request; each saved passkey keeps the RP ID it was made wit
                               chart does not blank the page. All the queries of one request share
                               ``request_time_s`` (4 s); each one also has the sandbox's own limit (2 s).
 ``GET /api/rev``              ``{rev}``; changes when the data, the published dashboards or their look change.
-``GET /api/styles``           ``{rev, theme_css, stylesheets: [names], assets: n}``: the look the dashboards use
+``GET /api/styles``           ``{rev, theme_css, stylesheets: [names], app_stylesheets: [paths], assets: n}``: the look the dashboards use
                               (``problem`` when the published look is damaged; the page then keeps easy-ui's own).
 ``GET /ui/theme.css``, ``/ui/styles/<name>.css``, ``/ui/assets/<path>``  the project's generated theme stylesheet,
                               its stylesheets and its fonts and pictures (signed in only; content type from the
@@ -931,17 +931,20 @@ async def api_styles(request: Request) -> Response:
         got = await run_in_threadpool(_source_styles, st)
     except EasyUIError as e:
         log.warning("the published look could not be used: %s", e.message)
-        return JSONResponse({"rev": "none", "theme_css": False, "stylesheets": [], "assets": 0,
+        return JSONResponse({"rev": "none", "theme_css": False, "stylesheets": [], "app_stylesheets": [], "assets": 0,
                              "problem": {"code": e.code, "message": security.scrub(e.message),
                                          "hint": security.scrub(e.hint)}})
     return JSONResponse(got.public())
 
 
-_UI_FILE_RE = re.compile(r"^(?:theme\.css|styles/[a-z0-9][a-z0-9._-]{0,60}\.css|assets/[A-Za-z0-9][A-Za-z0-9._/-]{0,300})\Z")
+_UI_FILE_RE = re.compile(
+    r"^(?:theme\.css|(?:apps/[a-z][a-z0-9-]{1,30}/)?(?:styles/[a-z0-9][a-z0-9._-]{0,60}\.css"
+    r"|assets/[A-Za-z0-9][A-Za-z0-9._/-]{0,300}))\Z")
 
 
 async def page_ui_file(request: Request) -> Response:
-    """``/ui/theme.css``, ``/ui/styles/<name>.css`` and ``/ui/assets/<path>``: the project's look, after sign-in."""
+    """``/ui/theme.css``, ``/ui/styles/<name>.css``, ``/ui/assets/<path>`` and an app's
+    ``/ui/apps/<app>/styles|assets/...``: the project's look, after sign-in."""
     st = _state(request)
     if current_session(request) is None:
         return _error_response(SignInRequired("You are not signed in, so the dashboards stay hidden.",

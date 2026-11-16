@@ -241,12 +241,12 @@ def test_tables_outside_the_allowlist_do_not_exist(bundle_path):
     with pytest.raises(QueryError) as e:
         run_query(bundle_path, "SELECT * FROM private_notes")
     assert "not in the dashboard data" in e.value.message
-    assert "activities, days, weekly" in e.value.hint
+    assert "activities, days, sleep_nights, weekly" in e.value.hint
 
 
 def test_readable_tables_are_exactly_the_bundle(bundle_path):
     with Sandbox(bundle_path) as sb:
-        assert sb.tables == {"days", "activities", "weekly"}
+        assert sb.tables == {"days", "activities", "weekly", "sleep_nights"}
 
 
 # ---------------------------------------------------------------- layer 5: time, rows, size

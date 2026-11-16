@@ -12,8 +12,10 @@
 import { api } from "./api.js";
 import { refreshTheme } from "./theme.js";
 
-const EMPTY = { rev: "none", theme_css: false, stylesheets: [], static: false };
+const EMPTY = { rev: "none", theme_css: false, stylesheets: [], app_stylesheets: [], static: false };
 const NAME = /^[a-z0-9][a-z0-9._-]{0,60}\.css$/;
+// An app's stylesheet (scoped by easy-ui to that app's dashboards and sections): apps/<app>/styles/<name>.css
+const APP_SHEET = /^apps\/[a-z][a-z0-9-]{1,30}\/styles\/[a-z0-9][a-z0-9._-]{0,60}\.css$/;
 let info = EMPTY;
 let allowed = false;
 let themeLink = null;
@@ -41,22 +43,29 @@ export async function loadLook() {
   }
   const next = got && typeof got === "object" ? got : EMPTY;
   const sheets = Array.isArray(next.stylesheets) ? next.stylesheets.filter((n) => typeof n === "string" && NAME.test(n)) : [];
+  const appSheets = Array.isArray(next.app_stylesheets)
+    ? next.app_stylesheets.filter((n) => typeof n === "string" && APP_SHEET.test(n)) : [];
   const fresh = {
     rev: typeof next.rev === "string" ? next.rev.slice(0, 64) : "none",
     theme_css: Boolean(next.theme_css),
     stylesheets: sheets,
+    app_stylesheets: appSheets,
     static: Boolean(next.static),
   };
   const changed = fresh.rev !== info.rev || fresh.theme_css !== info.theme_css
-    || fresh.stylesheets.join("\n") !== info.stylesheets.join("\n");
+    || fresh.stylesheets.join("\n") !== info.stylesheets.join("\n")
+    || fresh.app_stylesheets.join("\n") !== info.app_stylesheets.join("\n");
   info = fresh;
   sync();
   return changed;
 }
 
-/** The addresses of the project's stylesheets, in the order they apply. */
+/** The addresses of the apps' stylesheets and then the project's, in the order they apply (the project's last). */
 export function projectStylesheets() {
-  return info.stylesheets.map((name) => address(`ui/styles/${name}`));
+  return [
+    ...info.app_stylesheets.map((path) => address(`ui/${path}`)),
+    ...info.stylesheets.map((name) => address(`ui/styles/${name}`)),
+  ];
 }
 
 /** Whether the screen shown now may use the project's theme (never easy-ui's own screens). */

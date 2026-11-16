@@ -335,17 +335,19 @@ def test_dashboards_follow_the_app_order(demo_app):
     [('"overview"', "must be a list"), ('["Overview"]', "not a dashboard name"), ('["a", "a"]', "more than once")],
 )
 def test_bad_dashboard_order(tmp_path, value, needle):
-    (tmp_path / "project.toml").write_text(f'[project]\nname = "demo"\n[ui]\ndashboards = {value}\n')
+    (tmp_path / "project.toml").write_text(f'[project]\nname = "demo"\napps = ["demo_main"]\n[ui]\ndashboards = {value}\n')
     with pytest.raises(ConfigError) as e:
         appconfig.load(tmp_path)
     assert needle in e.value.message
 
 
-def test_validate_notes_an_order_name_without_a_file(built_app):
+def test_validate_refuses_an_order_name_without_a_dashboard(built_app):
+    """Contract 1.5: the names of [ui] dashboards must exist after composition."""
     toml = built_app.app_dir / "project.toml"
     toml.write_text(toml.read_text().replace('dashboards = ["overview", "activities"]', 'dashboards = ["overveiw"]'))
     code, data = run_cli_json("validate")
-    assert code == 0 and any("overveiw" in n for n in data["notes"])
+    problems = [p for d in data["dashboards"] for p in d["errors"]]
+    assert code == 1 and any('"overveiw"' in p["problem"] and p["file"] == "project.toml" for p in problems)
 
 
 # ---------------------------------------------------------------- rollback

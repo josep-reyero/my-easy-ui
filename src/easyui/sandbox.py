@@ -554,8 +554,9 @@ class Sandbox:
             did = f' Did you mean "{close[0]}"?' if close else ""
             return QueryError(
                 f'{_label(name)}reads a table called "{table}", which is not in the dashboard data.{did}',
-                hint=f"The tables available are: {', '.join(sorted(self.tables)) or '(none)'}. To add one, list it "
-                "under [ui] tables in project.toml and run: easy-ui data build",
+                hint=f"The tables available are: {', '.join(sorted(self.tables)) or '(none)'}. To add one, declare it "
+                "in project.toml ([tables] or [views]) or in an app's app.toml ([ui] tables), then run: easy-ui data "
+                "build",
                 detail=msg,
             )
         m = re.match(r'no such column: "(.*)" - should this be a string literal', msg, re.S)

@@ -264,7 +264,8 @@ def test_read_and_check_a_whole_look(tmp_path):
     assert st.get("assets/fonts/notes.woff2")[1] == "font/woff2"
     for bad in ("styles/../theme.yaml", "theme.yaml", "assets/missing.png", "styles/b.css", "../x"):
         assert st.get(bad) is None
-    assert styles.EMPTY.public() == {"rev": "none", "theme_css": False, "stylesheets": [], "assets": 0}
+    assert styles.EMPTY.public() == {"rev": "none", "theme_css": False, "stylesheets": [], "app_stylesheets": [],
+                                     "assets": 0}
 
 
 def test_links_are_never_followed(tmp_path):
@@ -398,7 +399,8 @@ def look_app(built_app):
 def test_publish_carries_the_look_and_serves_it_hash_checked(look_app):
     cfg = look_app.config()
     res = publish.publish(cfg)
-    assert [s["path"] for s in res["styles"]] == ["theme.yaml", "styles/a.css", "assets/fonts/notes.woff2", "assets/logo.svg"]
+    assert [s["path"] for s in res["styles"]] == ["theme.yaml", "styles/a.css", "assets/fonts/notes.woff2", "assets/logo.svg",
+                                                  "apps/demo-sleep/styles/sleep.css"]  # the demo's sleep app
     vdir = publish.published_dir(cfg)
     manifest = json.loads((vdir / "manifest.json").read_text())
     assert {e["path"] for e in manifest["styles"]} == {s["path"] for s in res["styles"]}

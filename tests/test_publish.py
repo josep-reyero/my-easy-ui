@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from conftest import ACTIVITIES_YAML, OVERVIEW_YAML, run_cli, run_cli_json
 
-from easyui import bundle, paths, publish, spec
+from easyui import bundle, compose, paths, publish, spec
 from easyui.errors import (
     NoData,
     NotFound,
@@ -81,7 +81,19 @@ def test_publish_creates_immutable_version(built_app):
     # writable folders: deleting the state folder to start over must just work
     assert stat.S_IMODE(vdir.stat().st_mode) == 0o755
     assert stat.S_IMODE((vdir / "dashboards").stat().st_mode) == 0o755
-    assert (vdir / "dashboards" / "overview.yaml").read_text() == OVERVIEW_YAML
+    # A dashboard made only by the project is stored as it is; the overview is stored composed with its apps' sections.
+    assert (vdir / "dashboards" / "activities.yaml").read_text() == ACTIVITIES_YAML
+    composed = (vdir / "dashboards" / "overview.yaml").read_text()
+    assert composed.startswith("# Composed by easy-ui from ui/dashboards/overview.yaml, apps/demo_moves/")
+    assert "app: demo-moves" in composed and "app: demo-sleep" in composed and "anchor:" not in composed
+    over = next(d for d in m["dashboards"] if d["slug"] == "overview")
+    assert over["from"] == "project" and over["replaces"] is None
+    assert [(s["app"], s["id"], s["placed"]) for s in over["sections"]] == [
+        ("demo-moves", "kinds", "after:movement"), ("demo-sleep", "sleep", "end")]
+    assert [x["from"] for x in over["sources"]] == ["project", "demo-moves", "demo-sleep"]
+    # The project's own files are kept as they were, for rollback --restore-files.
+    assert sorted(x["path"] for x in m["project_files"]) == ["ui/dashboards/activities.yaml", "ui/dashboards/overview.yaml"]
+    assert (vdir / "project" / "ui" / "dashboards" / "overview.yaml").read_text() == OVERVIEW_YAML
     assert not [p for p in st.specs.iterdir() if p.name.startswith(".tmp-")]
 
 
@@ -430,7 +442,8 @@ def test_list_and_load_published(built_app):
     assert listing[1] == {"slug": "overview", "title": "Overview",
                           "description": "Daily movement at a glance (synthetic demo data)."}
     compiled = publish.load_published(cfg, "overview", today=dt.date(2026, 5, 1))
-    assert compiled == spec.compile_dashboard(spec.loads(OVERVIEW_YAML, slug="overview"), today=dt.date(2026, 5, 1))
+    composed = compose.compose(cfg).get("overview").dashboard
+    assert compiled == spec.compile_dashboard(composed, today=dt.date(2026, 5, 1))
     assert "SELECT" not in json.dumps(compiled) and "FROM days" not in json.dumps(compiled)  # no SQL text
     dash = publish.load_published_dashboard(cfg, "activities")
     res = spec.run_queries(dash, ["by_kind"], {"kind": "run"}, bundle_path=bundle.require_current(cfg))

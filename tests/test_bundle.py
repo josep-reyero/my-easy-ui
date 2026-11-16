@@ -18,7 +18,7 @@ from easyui.errors import ConfigError, DataBuildError, NoData, NotFound, Tempora
 
 def change_data(app, steps: int) -> None:
     conn = sqlite3.connect(app.db_path)
-    conn.execute("UPDATE days SET steps = ? WHERE day = '2026-01-01'", (steps,))
+    conn.execute("UPDATE days__rows SET steps = ? WHERE day = '2026-01-01' AND source = 'demo-moves'", (steps,))
     conn.commit()
     conn.close()
 
@@ -29,13 +29,18 @@ def change_data(app, steps: int) -> None:
 def test_build_copies_only_allowlisted_tables(demo_app):
     res = demo_app.build()
     assert res["unchanged"] is False and res["previous"] is None
-    assert list(res["tables"]) == ["days", "activities", "weekly"]
-    assert res["tables"]["days"]["rows"] == 120
+    # The shared views (merged rows of both apps), the [views], then the apps' own [ui] tables.
+    assert list(res["tables"]) == ["days", "activities", "weekly", "sleep_nights"]
+    assert res["tables"]["days"]["rows"] == 120  # one row per day, merged from the two apps
     path = bundle.require_current(demo_app.config())
     conn = sqlite3.connect(path)
     objects = dict(conn.execute("SELECT name, type FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'").fetchall())
+    row = conn.execute("SELECT source, steps, sleep_s FROM days WHERE day = '2026-01-01'").fetchone()
     conn.close()
-    assert objects == {"days": "table", "activities": "table", "weekly": "table", "activities_day": "index"}
+    assert objects == {"days": "table", "activities": "table", "weekly": "table", "sleep_nights": "table",
+                       "days_key": "index", "activities_key": "index"}  # key indexes made by easy-ui itself
+    assert row[0] == "demo-moves" and row[1] and row[2]  # steps from moves, sleep from sleep: one row
+    assert b"days__rows" not in path.read_bytes()
     assert b"not for dashboards" not in path.read_bytes()
     assert b"synthetic secret" not in path.read_bytes()
 
@@ -113,14 +118,31 @@ def test_prune_never_removes_current(built_app):
 
 
 def test_missing_table_is_reported_with_closest_match(demo_app):
-    toml = DEMO_APP_TOML.format(name="demo").replace('"weekly"]', '"weekley", "privat_notes"]')
+    toml = DEMO_APP_TOML.format(name="demo", module="demo") + '\n[tables.privat_notes]\nkey = ["id"]\ncolumns = { id = "integer" }\n'
     (demo_app.app_dir / "project.toml").write_text(toml)
     with pytest.raises(NotFound) as e:
         demo_app.build()
-    assert 'did you mean "weekly"' in e.value.message
     assert 'did you mean "private_notes"' in e.value.message
     assert "previous data stays in use" in e.value.message
+    assert "mes db sync" in e.value.hint
     assert bundle.current_bundle(demo_app.config()) is None
+
+
+def test_ui_tables_must_be_allowed_ones(demo_app):
+    toml = DEMO_APP_TOML.format(name="demo", module="demo").replace(
+        'dashboards = ["overview", "activities"]', 'dashboards = ["overview", "activities"]\ntables = ["days", "weekley"]')
+    (demo_app.app_dir / "project.toml").write_text(toml)
+    with pytest.raises(ConfigError) as e:
+        demo_app.build()
+    assert 'Did you mean "weekly"' in e.value.message and "sleep_nights" in e.value.hint
+    toml = toml.replace('"weekley"]', '"private_notes"]')
+    (demo_app.app_dir / "project.toml").write_text(toml)
+    with pytest.raises(ConfigError):
+        demo_app.config().tables
+    toml = toml.replace('tables = ["days", "private_notes"]', 'tables = ["sleep_nights", "days"]')
+    (demo_app.app_dir / "project.toml").write_text(toml)
+    assert demo_app.config().tables == ("sleep_nights", "days")
+    assert list(demo_app.build()["tables"]) == ["sleep_nights", "days"]
 
 
 def test_failed_build_leaves_current_and_no_temp_files(built_app, monkeypatch):
@@ -158,7 +180,7 @@ def test_concurrent_build_is_temporary(demo_app):
 def test_view_with_repeated_column_names_gets_distinct_names(demo_app):
     conn = sqlite3.connect(demo_app.db_path)
     conn.execute("DROP VIEW weekly")
-    conn.execute("CREATE VIEW weekly AS SELECT day AS a, steps AS a FROM days")
+    conn.execute("CREATE VIEW weekly AS SELECT day AS a, steps AS a FROM days")  # an app's own odd view
     conn.commit()
     conn.close()
     res = demo_app.build()
@@ -169,7 +191,7 @@ def test_view_with_repeated_column_names_gets_distinct_names(demo_app):
 def test_source_in_wal_mode_is_read_without_changes(demo_app):
     conn = sqlite3.connect(demo_app.db_path)
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("INSERT INTO days (day, steps) VALUES ('2026-05-01', 1)")
+    conn.execute("INSERT INTO days__rows (source, day, steps) VALUES ('demo-moves', '2026-05-01', 1)")
     conn.commit()
     res = demo_app.build()  # while the app still holds a connection
     conn.close()
@@ -215,7 +237,7 @@ def test_rev_changes_with_published_specs(built_app):
 def test_describe_tables_samples(built_app):
     path = bundle.require_current(built_app.config())
     tables = {t["name"]: t for t in bundle.describe_tables(path, samples=2)}
-    assert set(tables) == {"days", "activities", "weekly"}
+    assert set(tables) == {"days", "activities", "weekly", "sleep_nights"}
     kind = next(c for c in tables["activities"]["columns"] if c["name"] == "kind")
     assert len(kind["samples"]) == 2 and all(isinstance(v, str) for v in kind["samples"])
     assert bundle.describe_tables(path, samples=0)[0]["columns"][0]["samples"] == []
@@ -233,9 +255,11 @@ def write_toml(tmp_path, text):
 def test_appconfig_reads_app_and_ui(demo_app):
     cfg = demo_app.config()
     assert (cfg.name, cfg.title, cfg.data, cfg.tables, cfg.accent) == (
-        "demo", "Demo app", "demo.sqlite", ("days", "activities", "weekly"), "#2f6fdf",
+        "demo", "Demo project", "demo.sqlite", ("days", "activities", "weekly", "sleep_nights"), "#2f6fdf",
     )
-    assert cfg.public() == {"name": "demo", "title": "Demo app", "accent": "#2f6fdf"}
+    assert cfg.packages == ("demo_moves", "demo_sleep")
+    assert cfg.shared_tables == ("days", "activities") and cfg.views == ("weekly",) and cfg.ui_tables is None
+    assert cfg.public() == {"name": "demo", "title": "Demo project", "accent": "#2f6fdf"}
     assert cfg.source_db() == demo_app.db_path
     assert cfg.dashboards_dir == demo_app.app_dir / "ui" / "dashboards"
     assert cfg.state.root == demo_app.state_home / "demo"
@@ -245,6 +269,8 @@ def test_appconfig_found_from_a_subfolder(demo_app, monkeypatch):
     monkeypatch.chdir(demo_app.app_dir / "ui" / "dashboards")
     assert appconfig.load().app_dir == demo_app.app_dir.resolve()
     assert appconfig.load(demo_app.app_dir / "project.toml").name == "demo"
+    monkeypatch.chdir(demo_app.app_dir / "apps" / "demo_sleep")  # inside an app: still the project
+    assert appconfig.load().name == "demo"
 
 
 def test_appconfig_missing(tmp_path, monkeypatch):
@@ -256,23 +282,25 @@ def test_appconfig_missing(tmp_path, monkeypatch):
         appconfig.load(tmp_path)
 
 
+BASE = '[project]\nname = "demo"\napps = ["demo_main"]\n'
+
+
 @pytest.mark.parametrize(
     "ui, words",
     [
-        ('datta = "x.sqlite"', 'Did you mean "data"'),
-        ('data = "../other/x.sqlite"', "not a plain path"),
-        ('data = "/etc/passwd"', "not a plain path"),
-        ('data = "~/x.sqlite"', "not a plain path"),
-        ("data = 3", "file name in quotes"),
+        ('tabels = ["days"]', 'Did you mean "tables"'),
         ('tables = "days"', "list of table names"),
         ('tables = ["days; DROP"]', "cannot use"),
+        ('tables = ["days__rows"]', "never <name>__rows"),
         ('tables = ["days", "days"]', "more than once"),
         ('accent = "red"', "colour"),
         ('accent = "#12345"', "colour"),
+        ('refresh_after = ["sync"]', "job id"),
+        ('refresh_after = "demo-main.sync"', "list of job ids"),
     ],
 )
 def test_appconfig_ui_errors(tmp_path, ui, words):
-    write_toml(tmp_path, f'[project]\nname = "demo"\n\n[ui]\n{ui}\n')
+    write_toml(tmp_path, f"{BASE}\n[ui]\n{ui}\n")
     with pytest.raises(ConfigError) as e:
         appconfig.load(tmp_path)
     assert words in e.value.message + (e.value.hint or "")
@@ -283,26 +311,68 @@ def test_appconfig_ui_errors(tmp_path, ui, words):
     [
         ("[ui]\n", "no [project]"),
         ('[project]\nname = "Bad Name"\n', "not valid"),
-        ('[project]\nname = "demo"\ntitle = ""\n', "short piece of text"),
+        ('[project]\nname = "mes"\napps = ["x_y"]\n', "not valid"),
+        ('[project]\nname = "demo"\napps = ["demo_main"]\ntitle = ""\n', "short piece of text"),
         ('[app\nname = "demo"', "typing mistake on line 1"),
+        ('[project]\nname = "demo"\n', "does not list its apps"),
+        ('[project]\nname = "demo"\napps = []\n', "1 to 16 package names"),
+        ('[project]\nname = "demo"\napps = ["Demo-Main"]\n', "not a Python package name"),
+        ('[project]\nname = "demo"\napps = ["a_b", "a_b"]\n', "more than once"),
+        (BASE + 'titel = "x"\n', 'Did you mean "title"'),
+        (BASE + '[future]\nx = 1\n', 'setting "future" at the top'),
+        (BASE + '[tables.Days]\nkey = ["d"]\n', "cannot be used as a name"),
+        (BASE + '[tables.a__b]\nkey = ["d"]\n', "cannot be used as a name"),
+        (BASE + '[tables.sqlite_x]\nkey = ["d"]\n', "cannot be used as a name"),
+        (BASE + '[tables.x]\nkey = ["d"]\n[views.x]\nsql = "SELECT 1"\n', "both a shared table and a view"),
     ],
 )
-def test_appconfig_app_errors(tmp_path, text, words):
+def test_appconfig_project_errors(tmp_path, text, words):
     write_toml(tmp_path, text)
     with pytest.raises(ConfigError) as e:
         appconfig.load(tmp_path)
     assert words in e.value.message
 
 
-def test_appconfig_ignores_other_tables_and_needs_ui_for_data(tmp_path):
-    write_toml(tmp_path, '[project]\nname = "demo"\nversion = "1"\nfuture = 1\n\n[jobs.x]\nrun = "x"\n')
-    cfg = appconfig.load(tmp_path)
-    assert cfg.title == "demo" and cfg.data is None and cfg.tables == ()
+@pytest.mark.parametrize(
+    "text, words, hint",
+    [
+        ('[project]\nname = "demo"\n\n[apps.demo]\ncommand = "demo"\n',
+         "still has the old [apps.demo] section", "Move the app into apps/<package>/ with an app.toml"),
+        ('[project]\nname = "demo"\napps = ["demo_main"]\n[jobs.sync]\nrun = "demo sync"\n',
+         "still has [jobs.sync]", "use [settings.<app>]"),
+        ('[project]\nname = "demo"\napps = ["demo_main"]\n[ui]\ndata = "demo.sqlite"\n',
+         "every project has one shared database, demo.sqlite", "Remove the data line from [ui]."),
+    ],
+)
+def test_old_project_forms_get_the_migration_messages(tmp_path, text, words, hint):
+    write_toml(tmp_path, text)
     with pytest.raises(ConfigError) as e:
-        cfg.source_db()
-    assert "[ui]" in e.value.hint
-    with pytest.raises(ConfigError):
-        cfg.require_tables()
+        appconfig.load(tmp_path)
+    assert words in e.value.message and hint in e.value.hint and e.value.code == "config_old_format"
+
+
+def test_appconfig_reads_only_names_of_tables_and_views(tmp_path):
+    write_toml(tmp_path, BASE + 'version = "1"\n\n[tables.days]\nkey = ["d"]\ncolumns = { d = "text" }\n'
+               '[views.weekly]\nsql = "SELECT 1"\n[settings.demo-main]\njobs.x.timeout = "5m"\n'
+               '[storage]\nbucket = "b"\n')
+    cfg = appconfig.load(tmp_path)
+    assert cfg.title == "demo" and cfg.data == "demo.sqlite" and cfg.shared_tables == ("days",)
+    assert cfg.views == ("weekly",)
+    assert cfg.manifest_sha256 and len(cfg.manifest_sha256) == 64
+
+
+def test_project_toml_size_limit_and_links(tmp_path):
+    write_toml(tmp_path, BASE + "# " + "x" * 300_000 + "\n")
+    with pytest.raises(ConfigError) as e:
+        appconfig.load(tmp_path)
+    assert "larger than 256 KB" in e.value.message
+    other = tmp_path / "elsewhere.toml"
+    other.write_text(BASE)
+    (tmp_path / "project.toml").unlink()
+    (tmp_path / "project.toml").symlink_to(other)
+    with pytest.raises(ConfigError) as e:
+        appconfig.load(tmp_path)
+    assert "not a link" in e.value.hint or "link" in e.value.message
 
 
 # ---------------------------------------------------------------- folders
@@ -340,4 +410,7 @@ def test_make_demo_app_is_reusable(tmp_path):
     app = make_demo_app(tmp_path / "other", name="other-app")
     assert app.env()["MES_DATA_HOME"].endswith("data")
     assert (app.app_dir / "ui" / "dashboards" / "overview.yaml").is_file()
-    assert app.db_path.name == "demo.sqlite"
+    assert app.db_path.name == "other-app.sqlite"
+    assert app.config().tables == ("days", "activities", "weekly", "sleep_nights")
+    assert [a.name for a in app.config().apps] == ["other-app-moves", "other-app-sleep"]
+    assert [a.short for a in app.config().apps] == ["moves", "sleep"]

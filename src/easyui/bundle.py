@@ -124,7 +124,8 @@ def require_current(where: AppConfig | paths.StatePaths) -> Path:
     if p is None:
         raise NoData(
             "There is no dashboard data yet, so the dashboards have nothing to show.",
-            hint="Build it with: easy-ui data build (it copies the tables listed in project.toml for the dashboards).",
+            hint="Build it with: easy-ui data build (it copies the tables dashboards may read from the project's "
+            "shared database).",
         )
     return p
 
@@ -291,6 +292,8 @@ def _copy_table(src: sqlite3.Connection, dst: sqlite3.Connection, name: str, kin
         dst.executemany(insert, chunk)
         count += len(chunk)
     indexes = 0
+    if kind == "view":
+        indexes += _index_shared_view(src, dst, name, cols)
     if kind == "table":
         for (sql,) in src.execute(
             "SELECT sql FROM sqlite_schema WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL", (name,)
@@ -303,16 +306,36 @@ def _copy_table(src: sqlite3.Connection, dst: sqlite3.Connection, name: str, kin
     return {"kind": kind, "rows": count, "columns": columns, "indexes": indexes}
 
 
+def _index_shared_view(src: sqlite3.Connection, dst: sqlite3.Connection, name: str, cols: list[str]) -> int:
+    """A shared table's view is copied with an index on its key columns (those of ``<name>__rows_key``).
+
+    Only the column names are read (``pragma_index_info``); the index is written by easy-ui itself.
+    """
+    try:
+        key = [r[0] for r in src.execute("SELECT name FROM pragma_index_info(?) ORDER BY seqno", (f"{name}__rows_key",))]
+    except sqlite3.Error:
+        return 0
+    if not key or len(key) > 4 or any(k is None or k not in cols for k in key):
+        return 0
+    try:
+        dst.execute(f"CREATE INDEX {_q(name + '_key')} ON {_q(name)} ({', '.join(_q(k) for k in key)})")
+    except sqlite3.Error:
+        return 0
+    return 1
+
+
 def _missing_tables_error(missing: list[str], available: list[str]) -> NotFound:
     parts = []
     for t in missing:
         close = difflib.get_close_matches(t, available, n=1)
         parts.append(f'"{t}"' + (f' (did you mean "{close[0]}"?)' if close else ""))
     return NotFound(
-        f"project.toml lists {', '.join(parts)} under [ui] tables, but the project's data file has no table or view with "
-        "that name, so the dashboard data was not built (the previous data stays in use).",
-        hint=f"Tables and views in the data file: {', '.join(available) or '(none)'}. Fix [ui] tables in project.toml, "
-        "then run: easy-ui data build",
+        f"Dashboards may read {', '.join(parts)} (a shared table, a view or an app's table), but the project's data "
+        "file has no table or view with that name yet, so the dashboard data was not built (the previous data stays "
+        "in use).",
+        hint=f"Tables and views in the data file: {', '.join(available) or '(none)'}. With my-easy-software, run: mes db "
+        "sync (it creates the shared tables and views), then the app's rebuild; or fix the name in project.toml or the "
+        "app's app.toml. Then run: easy-ui data build",
     )
 
 
@@ -323,7 +346,8 @@ def build(config: AppConfig, *, keep: int = DEFAULT_KEEP, now: _dt.datetime | No
         raise NotFound(
             f"The project's data file {paths.display_path(src_path)} does not exist yet, so there is nothing to copy "
             "for the dashboards.",
-            hint="Run the project's job or command that creates its data first, or check [ui] data in project.toml.",
+            hint="Run the project's jobs that write its data first (with my-easy-software: mes db sync, then the "
+            "apps' rebuild jobs).",
         )
     st = config.state.ensure()
     write_snapshot(config)

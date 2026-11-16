@@ -17,24 +17,27 @@ from easyui.errors import ConfigError, NotFound
 
 def test_project_toml_keys(tmp_path):
     (tmp_path / "project.toml").write_text(
-        '[project]\nname = "fitdata"\ntitle = "Fitness"\nversion = "0.1.0"\n\n'
-        '[apps.fitdata]\ncli = "fitdata"\n\n[jobs.sync]\nrun = "fitdata sync"\nschedule = "*:0/10"\n\n'
-        '[ui]\ndata = "fitdata.sqlite"\ntables = ["days"]\ndashboards = ["today", "sleep"]\nrefresh_after = ["sync"]\n\n'
-        '[storage]\nbucket = "archive"\n'
+        '[project]\nname = "fitdata"\ntitle = "Fitness"\nversion = "0.1.0"\napps = ["fitdata_garmin"]\n\n'
+        '[tables.days]\nkey = ["date"]\n[tables.days.columns]\ndate = "text"\nsteps = "integer"\n\n'
+        '[ui]\naccent = "#2a7f62"\ndashboards = ["today", "sleep"]\n'
+        'refresh_after = ["fitdata-garmin.daily", "fitdata-garmin.backfill"]\n\n'
+        '# [storage]\n# bucket = "archive"\n'
     )
     cfg = appconfig.load(tmp_path)
-    assert (cfg.name, cfg.title, cfg.version, cfg.dashboards, cfg.refresh_after) == (
-        "fitdata", "Fitness", "0.1.0", ("today", "sleep"), ("sync",),
+    assert (cfg.name, cfg.title, cfg.version, cfg.dashboards, cfg.refresh_after, cfg.packages) == (
+        "fitdata", "Fitness", "0.1.0", ("today", "sleep"), ("fitdata-garmin.daily", "fitdata-garmin.backfill"),
+        ("fitdata_garmin",),
     )
+    assert cfg.data == "fitdata.sqlite"  # the shared database keeps the fitness project's file name
 
 
 @pytest.mark.parametrize(
     "text, words",
     [
         ('[app]\nname = "demo"\n', "Rename the [app] table"),
-        ('[project]\nname = "demo"\nversion = "1 2"\n', "version"),
-        ('[project]\nname = "demo"\n[ui]\nrefresh_after = ["Sync Job"]\n', "job name"),
-        ('[project]\nname = "demo"\n[ui]\nrefresh_after = "sync"\n', "list of job names"),
+        ('[project]\nname = "demo"\napps = ["demo_main"]\nversion = "1 2"\n', "version"),
+        ('[project]\nname = "demo"\napps = ["demo_main"]\n[ui]\nrefresh_after = ["Sync Job"]\n', "job id"),
+        ('[project]\nname = "demo"\napps = ["demo_main"]\n[ui]\nrefresh_after = "sync"\n', "list of job ids"),
     ],
 )
 def test_project_toml_errors(tmp_path, text, words):
@@ -145,7 +148,7 @@ def test_shared_ui_folder_gets_group_readable_folders_whatever_the_umask(built_a
     assert stat.S_IMODE((root / "demo" / "auth").stat().st_mode) == 0o700
     assert stat.S_IMODE((ui / "project.json").stat().st_mode) == 0o644
     snap = json.loads((ui / "project.json").read_text())
-    assert snap == {"v": 1, "name": "demo", "title": "Demo app", "accent": "#2f6fdf",
+    assert snap == {"v": 1, "name": "demo", "title": "Demo project", "accent": "#2f6fdf",
                     "dashboards": ["overview", "activities"], "version": "0.1.0"}
     # The checklist accepts the shared layout (auth/ private, the ui folder closed to others).
     auth.set_password(root / "demo" / "auth", "a long synthetic password")
@@ -166,7 +169,7 @@ def test_serving_from_the_ui_folder_alone(built_app, tmp_path, monkeypatch):
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
     loaded = appconfig.load(ui_dir=ui)
-    assert (loaded.name, loaded.title, loaded.accent, loaded.dashboards) == ("demo", "Demo app", "#2f6fdf", ("overview", "activities"))
+    assert (loaded.name, loaded.title, loaded.accent, loaded.dashboards) == ("demo", "Demo project", "#2f6fdf", ("overview", "activities"))
     assert loaded.from_ui_dir and loaded.state.root == ui.resolve()
     with pytest.raises(ConfigError):
         loaded.source_db()  # never reaches for the project's data
@@ -203,7 +206,7 @@ def test_publish_and_build_write_the_snapshot(built_app):
     snap = json.loads(cfg.state.project_file.read_text())
     assert snap["name"] == "demo"
     (built_app.app_dir / "project.toml").write_text(
-        (built_app.app_dir / "project.toml").read_text().replace('title = "Demo app"', 'title = "Renamed"')
+        (built_app.app_dir / "project.toml").read_text().replace('title = "Demo project"', 'title = "Renamed"')
     )
     publish.publish(built_app.config())
     assert json.loads(cfg.state.project_file.read_text())["title"] == "Renamed"

@@ -10,6 +10,7 @@ import { renderBlocks } from "./text.js";
 
 const OWN_CLASS = /^[a-z][a-z0-9-]{0,40}$/;
 const COMPONENT_ID = /^[a-z0-9][a-z0-9-]{0,40}$/;
+export const APP_NAME = /^[a-z][a-z0-9-]{1,30}$/;
 
 /**
  * The stable names of a component's element (docs/STYLES.md): .eui-component, data-type, data-id and the
@@ -19,6 +20,8 @@ export function componentProps(comp, extra) {
   const own = Array.isArray(comp.class) ? comp.class.filter((c) => typeof c === "string" && OWN_CLASS.test(c) && !c.startsWith("eui-")) : [];
   const dataset = { type: String(comp.type) };
   if (typeof comp.id === "string" && COMPONENT_ID.test(comp.id)) dataset.id = comp.id;
+  // The app a contributed section comes from: that app's (scoped) stylesheets apply to it.
+  if (typeof comp.app === "string" && APP_NAME.test(comp.app)) dataset.app = comp.app;
   return { class: ["c", `c-${comp.type}`, "eui-component", extra, ...own], dataset };
 }
 

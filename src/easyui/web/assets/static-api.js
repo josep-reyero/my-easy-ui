@@ -157,7 +157,7 @@ export const api = {
   },
   async styles() {
     const p = await load();
-    const st = p.styles && typeof p.styles === "object" ? p.styles : { rev: "none", theme_css: false, stylesheets: [] };
+    const st = p.styles && typeof p.styles === "object" ? p.styles : { rev: "none", theme_css: false, stylesheets: [], app_stylesheets: [] };
     return { ...st, static: true };
   },
   async logout() {

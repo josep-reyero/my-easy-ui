@@ -238,7 +238,7 @@ def _source(config: AppConfig, *, working: bool, fixture: bool) -> tuple[Any, An
 def _look(config: AppConfig, source: Any, *, working: bool) -> styles.StyleSet:
     """The theme, stylesheets and assets that go into the copy."""
     if working:
-        checked = styles.check(styles.read_style_dir(config.app_dir / "ui"))
+        checked = styles.check(styles.read_project_look(config))
         if not checked.ok:
             first = checked.errors[0]
             raise Refused(

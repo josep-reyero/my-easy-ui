@@ -37,6 +37,8 @@ Public API
     ``base`` is ``"styles"`` (a stylesheet) or ``"assets"`` (the theme's font files);
     ``target`` is ``"assets/<path>"`` or ``"styles/<name>"``.
 ``check_stylesheet(text, *, file, name, stylesheets, assets, classes, properties, data_types) -> CssCheck``
+``scope_stylesheet(text, app) -> str``   an app's stylesheet limited to elements marked ``data-app="<app>"``.
+``app_at_rule_problems(text, *, file) -> list``   at-rules an app's stylesheet may not use (``@scope``, ``@page``).
 ``CssCheck`` (dataclass): ``errors``, ``warnings`` (problem dicts like ``spec.Problem.to_dict()``),
     ``font_faces`` (each ``@font-face`` rule as CSS text, its urls rewritten relative to ``ui/``),
     ``refs`` (every file it refers to), ``ok``.
@@ -406,7 +408,9 @@ def _closest(word: str, options: Iterable[str]) -> str | None:
 
 class _Checker:
     def __init__(self, text: str, file: str, name: str, stylesheets: Iterable[str], assets: Iterable[str],
-                 classes: Iterable[str], properties: Iterable[str], data_types: Iterable[str]) -> None:
+                 classes: Iterable[str], properties: Iterable[str], data_types: Iterable[str],
+                 url_prefix: str = "") -> None:
+        self.url_prefix = url_prefix
         self.text = text
         self.file = file
         self.name = name
@@ -682,7 +686,7 @@ class _Checker:
                              'Put the font in ui/assets/ as .woff2 and use url("../assets/<name>.woff2").')
                     return
                 out.append(self.text[pos:tok.start])
-                out.append(f'url("{target}")')
+                out.append(f'url("{self.url_prefix}{target}")')
                 pos = stop
                 k = self._advance_to(stop, k)
                 continue
@@ -814,10 +818,158 @@ def check_stylesheet(
     classes: Iterable[str] = (),
     properties: Iterable[str] = (),
     data_types: Iterable[str] = (),
+    url_prefix: str = "",
 ) -> CssCheck:
     if len(text.encode("utf-8", "surrogatepass")) > MAX_STYLESHEET_BYTES:
         res = CssCheck()
         res.errors.append(_problem(file, None, f"The stylesheet is larger than {MAX_STYLESHEET_BYTES // 1000} KB.",
                                    "Split it into several files, or remove what is not used.", None, "error"))
         return res
-    return _Checker(text, file, name, stylesheets, assets, classes, properties, data_types).run()
+    return _Checker(text, file, name, stylesheets, assets, classes, properties, data_types, url_prefix).run()
+
+
+# ---------------------------------------------------------------- an app's stylesheet, scoped to its own content
+
+APP_REFUSED_AT_RULES = {
+    "scope": "@scope is not needed in an app's stylesheet: easy-ui already limits it to the app's own dashboards and "
+    "sections.",
+    "page": "@page styles the printed page as a whole, which an app's stylesheet may not do.",
+    "view-transition": "@view-transition changes the whole page, which an app's stylesheet may not do.",
+}
+# Rules whose blocks hold more rules (their selectors are scoped too); other at-rules are left as they are.
+_RULE_BLOCKS = ("media", "supports", "layer", "container", "starting-style")
+_LEGACY_PSEUDO_ELEMENTS = ("before", "after", "first-line", "first-letter")
+
+
+def app_at_rule_problems(text: str, *, file: str) -> list[dict[str, Any]]:
+    """The at-rules an app's stylesheet may not use (on top of ``check_stylesheet``)."""
+    out = []
+    for t in tokenize(text):
+        if t.kind == "at-keyword" and t.value.lower() in APP_REFUSED_AT_RULES:
+            out.append(_problem(file, t.line, APP_REFUSED_AT_RULES[t.value.lower()], "Remove it.", None, "error"))
+    return out
+
+
+def _block_end(toks: list[Token], i: int, end: int) -> int:
+    """The index after the block or function opened at ``i`` (the stylesheet is already checked)."""
+    pairs = {"{": "}", "[": "]", "(": ")", "function": ")"}
+    stack = [pairs[toks[i].kind]]
+    j = i + 1
+    while j < end and stack:
+        k = toks[j].kind
+        if k in pairs:
+            stack.append(pairs[k])
+        elif k in ("}", "]", ")") and stack and k == stack[-1]:
+            stack.pop()
+        j += 1
+    return j
+
+
+def _scoped_selector(s: str, toks: list[Token], a: int, b: int, attr: str) -> str:
+    """One selector (tokens a..b-1) as two: inside an element of the app, and an element of the app itself."""
+    sel = s[toks[a].start:toks[b - 1].end]
+    last = a  # where the last compound selector starts
+    insert = toks[b - 1].end
+    depth = 0
+    k = a
+    while k < b:
+        t = toks[k]
+        if t.kind in ("function", "(", "["):
+            k = _block_end(toks, k, b)
+            continue
+        if t.kind == "whitespace" or (t.kind == "delim" and t.value in (">", "+", "~", "|")):
+            last = k + 1
+        k += 1
+    k = last
+    while k < b:
+        t = toks[k]
+        if t.kind in ("function", "(", "["):
+            k = _block_end(toks, k, b)
+            continue
+        if t.kind == "colon" and depth == 0:
+            nxt = toks[k + 1] if k + 1 < b else None
+            if nxt is not None and nxt.kind == "colon":
+                insert = t.start
+                break
+            if nxt is not None and nxt.kind == "ident" and nxt.value.lower() in _LEGACY_PSEUDO_ELEMENTS:
+                insert = t.start
+                break
+        k += 1
+    own = s[toks[a].start:insert] + f":where({attr})" + s[insert:toks[b - 1].end]
+    return f":where({attr}) {sel}, {own}"
+
+
+def _scope_prelude(s: str, toks: list[Token], i: int, j: int, attr: str, edits: list[tuple[int, int, str]]) -> None:
+    parts: list[tuple[int, int]] = []
+    start = i
+    k = i
+    while k < j:
+        t = toks[k]
+        if t.kind in ("function", "(", "["):
+            k = _block_end(toks, k, j)
+            continue
+        if t.kind == "comma":
+            parts.append((start, k))
+            start = k + 1
+        k += 1
+    parts.append((start, j))
+    pieces = []
+    for a, b in parts:
+        while a < b and toks[a].kind == "whitespace":
+            a += 1
+        while b > a and toks[b - 1].kind == "whitespace":
+            b -= 1
+        if a < b:
+            pieces.append(_scoped_selector(s, toks, a, b, attr))
+    if pieces:
+        first = next(t for t in toks[i:j] if t.kind != "whitespace")
+        last = next(t for t in reversed(toks[i:j]) if t.kind != "whitespace")
+        edits.append((first.start, last.end, ", ".join(pieces)))
+
+
+def scope_stylesheet(text: str, app: str) -> str:
+    """An app's (already checked) stylesheet with every rule limited to that app's own content.
+
+    Each selector ``S`` becomes ``:where([data-app="<app>"]) S, S:where([data-app="<app>"])`` (the second form
+    put before a pseudo-element): it matches only elements inside, or themselves, marked as the app's. ``:where()``
+    adds no specificity, so the project's own stylesheets, applied after the apps', keep the last word. Rules
+    inside ``@media``, ``@supports``, ``@layer``, ``@container`` and ``@starting-style`` are scoped the same way;
+    rules nested inside a rule follow their parent.
+    """
+    s = text.replace("\r\n", "\n").replace("\r", "\n").replace("\f", "\n")
+    toks = [t for t in tokenize(s) if t.kind != "comment-unclosed"]
+    attr = f'[data-app="{app}"]'
+    edits: list[tuple[int, int, str]] = []
+
+    def walk(i: int, end: int) -> None:
+        while i < end:
+            t = toks[i]
+            if t.kind in ("whitespace", "semicolon", "cdo", "cdc", "}"):
+                i += 1
+                continue
+            j = i
+            while j < end and toks[j].kind not in ("{", "semicolon"):
+                if toks[j].kind in ("function", "(", "["):
+                    j = _block_end(toks, j, end)
+                    continue
+                j += 1
+            if j >= end or toks[j].kind == "semicolon":
+                i = j + 1
+                continue
+            close = _block_end(toks, j, end)
+            if t.kind == "at-keyword":
+                if t.value.lower() in _RULE_BLOCKS:
+                    walk(j + 1, close - 1)
+            else:
+                _scope_prelude(s, toks, i, j, attr, edits)
+            i = close
+
+    walk(0, len(toks))
+    out = []
+    pos = 0
+    for a, b, new in sorted(edits):
+        out.append(s[pos:a])
+        out.append(new)
+        pos = b
+    out.append(s[pos:])
+    return "".join(out)

@@ -69,7 +69,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from easyui import bundle, paths, publish, sandbox, spec, styles
+from easyui import bundle, compose, paths, project, publish, sandbox, spec, styles
 from easyui.appconfig import AppConfig
 from easyui.errors import ConfigError, EasyUIError, NotAvailable, NotFound, SpecError, UsageError
 
@@ -196,7 +196,12 @@ def problem_page(slug: str, title: str | None, file: str | None, errors: list[di
 
 
 class WorkingSource:
-    """Dashboards read live from the project's ``ui/dashboards/`` (validated against the preview data)."""
+    """Dashboards composed live from the project and its apps (validated against the preview data).
+
+    It watches ``project.toml``, ``apps.lock.json``, the project's ``ui/dashboards/``, ``ui/sections/`` and look,
+    and each app's ``app.toml``, ``dashboards/``, ``styles/`` and ``assets/``: any change shows within a couple of
+    seconds. When ``project.toml`` changes it is read again (and the data rebuilt if the tables changed).
+    """
 
     preview = True
 
@@ -213,6 +218,7 @@ class WorkingSource:
         self._styles: styles.StyleSet = styles.EMPTY
         self._style_problems: list[dict[str, Any]] = []
         self._style_warnings: list[dict[str, Any]] = []
+        self._order: list[str] = []
         self._rev = ""
 
     # -- watching
@@ -225,18 +231,20 @@ class WorkingSource:
 
     def _scan_fingerprint(self) -> str:
         h = hashlib.sha256()
-        d = self.cfg.dashboards_dir
+        _stat_tree(h, self.cfg.app_dir, (paths.MANIFEST_FILE, project.LOCK_FILE), depth=4)
+        _stat_tree(h, self.cfg.app_dir / "ui", ("dashboards", "sections", "theme.yaml", "theme.yml", "styles",
+                                                "assets"), depth=0)
         try:
-            with os.scandir(d) as it:
-                for e in sorted(it, key=lambda e: e.name):
-                    try:
-                        s = e.stat(follow_symlinks=False)
-                    except OSError:
-                        continue
-                    h.update(f"{e.name}\0{s.st_size}\0{s.st_mtime_ns}\0{s.st_ino}\0{s.st_mode}\n".encode())
-        except OSError:
-            h.update(b"no-folder")
-        _stat_tree(h, self.cfg.app_dir / "ui", ("theme.yaml", "theme.yml", "styles", "assets"), depth=0)
+            apps = project.load_apps(self.cfg)
+        except EasyUIError as e:
+            h.update(f"apps:{e.message}".encode())
+            apps = ()
+        for app in apps:
+            try:
+                with app.open() as folder:
+                    h.update(f"{app.name}:{folder.stat_tree(('app.toml', 'dashboards', 'styles', 'assets'))}".encode())
+            except EasyUIError as e:
+                h.update(f"{app.name}:{e.message}".encode())
         h.update(bundle.data_rev(self.cfg).encode())
         return h.hexdigest()
 
@@ -269,17 +277,44 @@ class WorkingSource:
             if not res["unchanged"]:
                 self.log("The data file changed; the preview now uses the new data.")
 
+    def _reread_project(self) -> None:
+        """project.toml may have changed: read it again (keeping the preview's own folders)."""
+        from easyui import appconfig  # noqa: PLC0415
+
+        fresh = appconfig.load(self.cfg.app_dir)
+        old_tables = _tables_or_none(self.cfg)
+        self.cfg = PreviewConfig.wrap(fresh, self.cfg.preview_root, self.cfg.source_override)  # type: ignore[arg-type]
+        if _tables_or_none(self.cfg) != old_tables:
+            self._rebuild_data()
+
     def _reload(self) -> None:
-        current = bundle.current_bundle(self.cfg)
+        problems: list[dict[str, Any]] = []
+        results: list[dict[str, Any]] = []
+        notes: list[str] = []
+        apps: tuple[Any, ...] = ()
         try:
-            files, problems, notes = publish.read_dashboard_dir(self.cfg.dashboards_dir, label_prefix="ui/dashboards/")
+            self._reread_project()
+            apps = self.cfg.apps
+            comp = compose.compose(self.cfg, bundle_path=bundle.current_bundle(self.cfg), apps=apps)
         except EasyUIError as e:
-            files, problems, notes = [], [publish._problem("ui/dashboards/", e.message, e.hint)], []
-        results = publish.validate_sources(files, current)
+            problems = [publish._problem(paths.MANIFEST_FILE, e.message, e.hint)]
+            comp = None
+        if comp is not None:
+            problems = list(comp.problems)
+            notes = list(comp.notes)
+            self._order = list(comp.order)
+            for d in comp.dashboards:
+                results.append({"slug": d.slug, "file": d.file, "title": d.title, "description": d.description,
+                                "ok": d.ok, "errors": d.errors, "warnings": d.warnings, "dashboard": d.dashboard,
+                                "from": d.origin, "sections": d.sections})
         self._entries = {r["slug"]: r for r in results}
         self._file_problems = problems
         self._notes = notes
-        checked = styles.check(styles.read_style_dir(self.cfg.app_dir / "ui"))
+        try:
+            look = styles.read_project_look(self.cfg, apps)
+        except EasyUIError as e:
+            look = styles.StyleFiles(problems=[publish._problem(paths.MANIFEST_FILE, e.message, e.hint)])
+        checked = styles.check(look)
         self._styles = checked.styles if checked.styles is not None else styles.EMPTY
         self._style_problems = checked.errors
         self._style_warnings = checked.warnings
@@ -311,7 +346,8 @@ class WorkingSource:
         with self._lock:
             self._ready()
             out = []
-            for slug, r in self._entries.items():
+            rank = {s: i for i, s in enumerate(self._order)}
+            for slug, r in sorted(self._entries.items(), key=lambda kv: rank.get(kv[0], len(rank))):
                 title = r["title"] or slug
                 out.append({"slug": slug, "title": title if r["ok"] else f"{title} (needs fixing)",
                             "description": r["description"], "ok": r["ok"]})
@@ -324,10 +360,12 @@ class WorkingSource:
         problems = list(self._file_problems) + list(self._style_problems) + (
             [self._data_problem] if self._data_problem else [])
         if not self._entries and not problems:
-            intro = ("There are no dashboards yet in ui/dashboards/. Create one, for example ui/dashboards/overview.yaml "
-                     "(see: easy-ui components); it appears here as soon as you save it.")
+            intro = ("There are no dashboards yet in ui/dashboards/ (or in the project's apps). Create one, for "
+                     "example ui/dashboards/overview.yaml (see: easy-ui components); it appears here as soon as you "
+                     "save it.")
             return problem_page(PROBLEMS_SLUG, "No dashboards yet", None, [], [], intro=intro)
-        intro = "Some files in ui/dashboards/ or the data could not be used. Fix them and this page reloads by itself."
+        intro = ("Some files of the project or its apps, or the data, could not be used. Fix them and this page "
+                 "reloads by itself.")
         if self._style_problems:
             intro = ("Some files could not be used. While the theme, ui/styles/ or ui/assets/ have mistakes, the "
                      "dashboards are shown with easy-ui's own look. Fix them and this page reloads by itself.")
@@ -377,6 +415,13 @@ class WorkingSource:
                 "style_warnings": list(self._style_warnings),
                 "notes": list(self._notes),
             }
+
+
+def _tables_or_none(cfg: AppConfig) -> tuple[str, ...] | None:
+    try:
+        return cfg.tables
+    except EasyUIError:
+        return None
 
 
 def _stat_tree(h: Any, folder: Path, names: tuple[str, ...] | None, depth: int) -> None:

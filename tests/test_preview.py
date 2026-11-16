@@ -72,7 +72,7 @@ def test_prepare_uses_real_data_in_a_throwaway_folder(demo_app):
         assert not demo_app.state_home.exists() or not any(demo_app.state_home.rglob("*.sqlite"))
         assert len(p.token) >= 32
         tables = {t["name"] for t in bundle.describe_tables(bundle.current_bundle(p.config))}
-        assert tables == {"days", "activities", "weekly"}  # only the allowlist, as in data build
+        assert tables == {"days", "activities", "weekly", "sleep_nights"}  # only the allowlist, as in data build
     finally:
         p.close()
     assert not p.root.exists()
@@ -92,7 +92,7 @@ def test_fixture_is_used_when_there_is_no_real_data(demo_app):
     p = preview.prepare(demo_app.config())
     try:
         assert p.data["from"] == "fixture" and p.data["file"] == "ui/fixtures/sample.sqlite"
-        assert p.source.list()[1]["slug"] == "overview"
+        assert p.source.list()[0]["slug"] == "overview"
     finally:
         p.close()
 
@@ -153,10 +153,17 @@ def test_fixture_without_allowlisted_tables(demo_app, monkeypatch):
 
 def test_lists_and_compiles_from_the_working_folder(pv):
     listing = pv.source.list()
-    assert [d["slug"] for d in listing] == ["activities", "overview"]
+    assert [d["slug"] for d in listing] == ["overview", "activities"]  # the menu order of [ui] dashboards
     assert all(d["ok"] for d in listing)
     c = pv.source.compiled("overview")
-    assert c == spec.compile_dashboard(spec.loads(OVERVIEW_YAML, slug="overview"))
+    base = spec.compile_dashboard(spec.loads(OVERVIEW_YAML, slug="overview"))
+    # The project's overview, with the sections of its two apps placed in it (marked as theirs).
+    titles = [[x["title"] for x in row] for row in c["layout"]]
+    assert [t for t, row in zip(titles, c["layout"], strict=True) if not row[0]["app"]] == [
+        [x["title"] for x in row] for row in base["layout"]]
+    assert titles[2] == ["Distance by kind"] and c["layout"][2][0]["app"] == "demo-moves"
+    assert titles[-1] == ["Sleep per night", "Asleep on average"] and c["layout"][-1][0]["app"] == "demo-sleep"
+    assert set(c["queries"]) == {*base["queries"], "moves_by_kind", "sleep_nightly", "sleep_average"}
     dash = pv.source.dashboard("overview")
     res = spec.run_queries(dash, ["totals"], {"since": "2026-04-01"}, bundle_path=pv.source.bundle_path())
     assert res["results"]["totals"]["rows"][0][3] == 30
@@ -245,7 +252,7 @@ def test_data_file_change_rebuilds_the_data(pv, demo_app):
     r1 = pv.source.rev()
     b1 = bundle.current_bundle(pv.config)
     con = sqlite3.connect(demo_app.db_path)
-    con.execute("INSERT INTO days (day, steps) VALUES ('2026-05-01', 1)")
+    con.execute("INSERT INTO days__rows (source, day, steps) VALUES ('demo-moves', '2026-05-01', 1)")
     con.commit()
     con.close()
     os.utime(demo_app.db_path, ns=(time.time_ns(), time.time_ns() + 2_000_000_000))

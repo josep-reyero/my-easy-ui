@@ -194,9 +194,29 @@ class StyleFiles:
     assets: list[Blob] = field(default_factory=list)
     problems: list[dict[str, Any]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    app_stylesheets: list[Blob] = field(default_factory=list)  # paths apps/<app name>/styles/<name>.css
+    app_assets: list[Blob] = field(default_factory=list)  # paths apps/<app name>/assets/<path>
 
     def blobs(self) -> list[Blob]:
-        return ([self.theme] if self.theme else []) + list(self.stylesheets) + list(self.assets)
+        return ([self.theme] if self.theme else []) + list(self.stylesheets) + list(self.assets) + \
+            list(self.app_stylesheets) + list(self.app_assets)
+
+    def add(self, b: Blob) -> None:
+        """Sort a published or archived file into its place by its path."""
+        if b.path == themes.THEME_FILE:
+            self.theme = b
+        elif b.path.startswith("styles/"):
+            self.stylesheets.append(b)
+        elif b.path.startswith("assets/"):
+            self.assets.append(b)
+        elif b.path.startswith("apps/") and b.path.split("/")[2] == "styles":
+            self.app_stylesheets.append(b)
+        else:
+            self.app_assets.append(b)
+
+    def sort(self) -> None:
+        for items in (self.stylesheets, self.assets, self.app_stylesheets, self.app_assets):
+            items.sort(key=lambda b: b.path)
 
     @property
     def empty(self) -> bool:
@@ -283,6 +303,35 @@ def read_style_dir(ui_dir: str | Path, *, label_prefix: str = "ui/") -> StyleFil
         _read_assets(ui, out, label_prefix)
     finally:
         os.close(ui)
+    return out
+
+
+APP_PATH_RE = re.compile(r"^apps/(?P<app>[a-z][a-z0-9-]{1,30})/(?P<rest>(?:styles|assets)/.+)\Z")
+
+
+def read_app_styles(app: Any, out: StyleFiles) -> None:
+    """An app's ``styles/*.css`` and ``assets/**`` (in its own folder), added to ``out`` under ``apps/<app>/``.
+
+    Read the same way as the project's (no links followed, the same limits per app), from the app folder opened by
+    ``easyui.project.AppFolder``, so nothing outside the app's folder is ever read.
+    """
+    sub = StyleFiles()
+    with app.open() as folder:
+        _read_stylesheets(folder.fd, sub, f"{app.label}/")
+        _read_assets(folder.fd, sub, f"{app.label}/")
+    for b in sub.stylesheets:
+        out.app_stylesheets.append(Blob(f"apps/{app.name}/{b.path}", b.label, b.data, b.sha256))
+    for b in sub.assets:
+        out.app_assets.append(Blob(f"apps/{app.name}/{b.path}", b.label, b.data, b.sha256))
+    out.problems.extend(sub.problems)
+    out.notes.extend(sub.notes)
+
+
+def read_project_look(config: Any, apps: Any = None) -> StyleFiles:
+    """The project's look (``ui/``) and every app's styles and assets, in ``[project] apps`` order."""
+    out = read_style_dir(Path(config.app_dir) / "ui")
+    for app in (config.apps if apps is None else apps):
+        read_app_styles(app, out)
     return out
 
 
@@ -483,13 +532,16 @@ class StyleSet:
     has_theme_css: bool = False
     rev: str = "none"
     theme_source: Blob | None = None
+    app_stylesheets: list[Blob] = field(default_factory=list)  # as served: scoped to the app's own content
+    app_assets: dict[str, Blob] = field(default_factory=dict)  # apps/<app>/assets/<path> -> Blob
 
     def public(self) -> dict[str, Any]:
         return {
             "rev": self.rev,
             "theme_css": self.has_theme_css,
             "stylesheets": [b.path[len("styles/"):] for b in self.stylesheets],
-            "assets": len(self.assets),
+            "app_stylesheets": [b.path for b in self.app_stylesheets],
+            "assets": len(self.assets) + len(self.app_assets),
         }
 
     def get(self, path: str) -> tuple[bytes, str] | None:
@@ -505,6 +557,12 @@ class StyleSet:
             rel = path[len("assets/"):]
             b = self.assets.get(rel)
             return (b.data, self.types[rel]) if b is not None else None
+        if path.startswith("apps/"):
+            for b in self.app_stylesheets:
+                if b.path == path:
+                    return b.data, "text/css; charset=utf-8"
+            b = self.app_assets.get(path)
+            return (b.data, self.types[path]) if b is not None else None
         return None
 
     def files(self) -> dict[str, bytes]:
@@ -516,6 +574,10 @@ class StyleSet:
             out[b.path] = b.data
         for rel, b in self.assets.items():
             out[f"assets/{rel}"] = b.data
+        for b in self.app_stylesheets:
+            out[b.path] = b.data
+        for path, b in self.app_assets.items():
+            out[path] = b.data
         return out
 
 
@@ -573,18 +635,77 @@ def check(files: StyleFiles) -> StyleCheck:
         res.errors.extend(c.errors)
         res.warnings.extend(c.warnings)
         font_faces.extend(c.font_faces)
+    app_sheets, app_assets, app_faces = _check_apps(files, res, types)
     if res.errors:
         return res
     h = hashlib.sha256()
     for b in files.blobs():
         h.update(f"{b.path}\0{b.sha256}\n".encode())
-    generated = themes.theme_css(theme_obj, font_faces)
+    faces = app_faces + font_faces  # the project's last, so its own fonts win
+    generated = themes.theme_css(theme_obj, faces)
     res.styles = StyleSet(
         theme=theme_obj, stylesheets=list(files.stylesheets), assets=assets, types=types,
-        theme_css=generated.encode("utf-8"), has_theme_css=theme_obj is not None or bool(font_faces),
+        theme_css=generated.encode("utf-8"), has_theme_css=theme_obj is not None or bool(faces),
         rev=h.hexdigest()[:16] if files.blobs() else "none", theme_source=files.theme,
+        app_stylesheets=app_sheets, app_assets=app_assets,
     )
     return res
+
+
+def _app_words(p: dict[str, Any]) -> dict[str, Any]:
+    """Problems of an app's stylesheet speak of the app's folders, not the project's ui/."""
+    for k in ("problem", "hint"):
+        if isinstance(p.get(k), str):
+            p[k] = (p[k].replace("ui/assets/", "the app's assets/ folder").replace("ui/styles/", "the app's styles/ "
+                    "folder"))
+    return p
+
+
+def _check_apps(files: StyleFiles, res: StyleCheck, types: dict[str, str]) -> tuple[list[Blob], dict[str, Blob], list[str]]:
+    """Each app's assets and stylesheets: checked against the app's own files, then scoped to the app's content."""
+    by_app: dict[str, tuple[list[Blob], list[Blob]]] = {}
+    for b in files.app_stylesheets + files.app_assets:
+        m = APP_PATH_RE.match(b.path)
+        if m is None:
+            res.errors.append(_problem(b.label, f"{b.label} is not a file easy-ui serves for an app.",
+                                       "Keep an app's look in its styles/ and assets/ folders."))
+            continue
+        sheets, assets = by_app.setdefault(m.group("app"), ([], []))
+        (sheets if m.group("rest").startswith("styles/") else assets).append(b)
+    served: list[Blob] = []
+    served_assets: dict[str, Blob] = {}
+    faces: list[str] = []
+    for app, (sheets, assets) in by_app.items():
+        base = f"apps/{app}/"
+        names: set[str] = set()
+        for b in assets:
+            rel = b.path[len(base) + len("assets/"):]
+            ctype, why = asset_type(rel, b.data)
+            names.add(rel)
+            if why:
+                res.errors.append(_problem(b.label, why, "Use .woff2 fonts and .png, .jpg, .webp or plain .svg pictures."))
+                continue
+            served_assets[b.path] = b
+            types[b.path] = ctype  # type: ignore[assignment]
+        sheet_names = [b.path[len(base) + len("styles/"):] for b in sheets]
+        for b in sorted(sheets, key=lambda x: x.path):
+            try:
+                text = b.data.decode("utf-8")
+            except UnicodeDecodeError:
+                res.errors.append(_problem(b.label, f"{b.label} is not UTF-8 text.", "Save it as UTF-8 text."))
+                continue
+            c = css.check_stylesheet(
+                text, file=b.label, name=b.path[len(base) + len("styles/"):], stylesheets=sheet_names, assets=names,
+                classes=STABLE_CLASSES, properties=CUSTOM_PROPERTIES, data_types=spec.COMPONENT_TYPES, url_prefix=base,
+            )
+            errs = c.errors + css.app_at_rule_problems(text, file=b.label)
+            res.errors.extend(_app_words(e) for e in errs)
+            res.warnings.extend(_app_words(w) for w in c.warnings)
+            faces.extend(c.font_faces)
+            if not errs:
+                scoped = css.scope_stylesheet(text, app).encode("utf-8")
+                served.append(Blob(b.path, b.label, scoped, _sha(scoped)))
+    return served, served_assets, faces
 
 
 def summary(files: StyleFiles) -> dict[str, Any]:
@@ -592,11 +713,13 @@ def summary(files: StyleFiles) -> dict[str, Any]:
         "theme": files.theme.label if files.theme else None,
         "stylesheets": [b.label for b in files.stylesheets],
         "assets": [b.label for b in files.assets],
+        "app_stylesheets": [b.label for b in files.app_stylesheets],
+        "app_assets": [b.label for b in files.app_assets],
     }
 
 
 def validate_project(config: Any) -> dict[str, Any]:
-    files = read_style_dir(config.app_dir / "ui")
+    files = read_project_look(config)
     res = check(files)
     return {"ok": res.ok, "errors": res.errors, "warnings": res.warnings, "files": summary(files),
             "notes": res.notes}

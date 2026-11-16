@@ -206,7 +206,7 @@ def test_session_endpoint_before_sign_in(client):
     assert r.status_code == 200
     assert r.json() == {
         "signed_in": False,
-        "app": {"name": "demo", "title": "Demo app", "accent": "#2f6fdf"},
+        "app": {"name": "demo", "title": "Demo project", "accent": "#2f6fdf"},
         "sign_in": {"password": True, "passkeys": False, "passkeys_here": True, "recovery": False},
     }
 
