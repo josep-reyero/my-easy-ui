@@ -279,10 +279,15 @@ def _cmd_validate(args: argparse.Namespace) -> Result:
     if look is not None:
         f = look["files"]
         if f["theme"] or f["stylesheets"] or f["assets"] or look["errors"]:
-            n_files = (1 if f["theme"] else 0) + len(f["stylesheets"]) + len(f["assets"])
-            state = "ok" if look["ok"] else f"{len(look['errors'])} problem(s)"
-            lines.append(f"The look (theme, {len(f['stylesheets'])} stylesheet(s), {len(f['assets'])} asset(s); "
-                         f"{n_files} file(s)): {state}" + (f", {len(look['warnings'])} warning(s)" if look["warnings"] else ""))
+            def count(n: int, word: str) -> str:
+                return f"{n} {word}" + ("" if n == 1 else "s")
+
+            parts = (["the theme"] if f["theme"] else []) + [
+                count(len(f["stylesheets"]), "stylesheet"), count(len(f["assets"]), "font or picture file")]
+            parts = [x for x in parts if not x.startswith("0 ")] or ["no files"]
+            state = "ok" if look["ok"] else count(len(look["errors"]), "mistake") + " (nothing is published until fixed)"
+            lines.append(f"The look ({', '.join(parts)}): {state}"
+                         + (f"; {count(len(look['warnings']), 'warning')}" if look["warnings"] else ""))
             for p in look["errors"] + look["warnings"]:
                 prob = spec.Problem(file=p["file"], where=p.get("where", ""), message=p["problem"], line=p.get("line"),
                                     hint=p.get("hint"), allowed=p.get("allowed"), did_you_mean=p.get("did_you_mean"),
