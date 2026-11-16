@@ -1,13 +1,5 @@
 # my-easy-ui
 
-> **Rework in progress.** Fully flexible styles (a theme file plus real CSS) are built: see
-> [docs/STYLES.md](docs/STYLES.md). Apps as proper packages that contribute dashboards, sections
-> and styles to a project ([design](https://github.com/josep-reyero/my-easy-software/blob/main/docs/apps.md))
-> are built on easy-ui's side (they follow the apps contract in my-easy-software's
-> `docs/apps-contract.md`); the my-easy-software side (`mes apps sync`, which writes
-> `apps.lock.json`, and `mes db sync`, which makes the shared database) is still being built.
-> Until this note is removed, expect file formats and some commands to change.
-
 A small dashboard server and browser renderer for projects built with [my-easy-software](https://github.com/josep-reyero/my-easy-software). One
 server process serves one project.
 
