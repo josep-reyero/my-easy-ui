@@ -46,7 +46,8 @@ owner sets the password (and adds passkeys) again.
 Public API
 ----------
 ``APP_NAME_RE`` / ``PROJECT_NAME_RE``  ``^[a-z][a-z0-9-]{1,30}$`` (same as mes).
-``MANIFEST_FILE`` ``"project.toml"``; ``OLD_MANIFEST_FILE`` ``"app.toml"`` (no longer read).
+``MANIFEST_FILE`` ``"project.toml"``; ``OLD_MANIFEST_FILE`` ``"app.toml"`` (an old project file at a project's
+root is no longer read; an app's own app.toml is read by ``easyui.project``).
 ``data_home() -> Path``, ``state_home() -> Path``, ``server_root() -> Path | None``
     Base folders (not created).
 ``config_path() -> Path``                 this machine's mes config file (may not exist).

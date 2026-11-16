@@ -1,0 +1,23 @@
+[app]
+name = "fitlab-walks"
+title = "Walks"
+cli = "fitlab_walks.cli:app"
+
+[data]
+folder = "walks"
+writes = ["activities", "days"]
+tables = ["walks_log"]
+rebuild = "rebuild"
+
+[jobs.rebuild]
+run = "rebuild"
+manual = true
+timeout = "2m"
+network = false
+
+[ui]
+dashboards = ["walks"]
+tables = ["walks_log"]
+
+[ui.contributes.overview]
+sections = "dashboards/overview-walks.yaml"

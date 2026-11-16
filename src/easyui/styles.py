@@ -767,8 +767,62 @@ def style_guide() -> dict[str, Any]:
 # ---------------------------------------------------------------- ready-made themes
 
 
+APP_THEME_RE = re.compile(r"^(?P<app>[a-z][a-z0-9-]{1,30})/(?P<name>[a-z][a-z0-9-]{0,30})\Z")
+
+
+def app_themes(config: Any, apps: Any = None) -> tuple[list[dict[str, Any]], list[str]]:
+    """Ready-made themes the project's apps ship in ``<app folder>/themes/<name>.yaml``, named ``<app>/<name>``.
+
+    Each is read like every app file (no links, at most ``theme.MAX_THEME_BYTES``) and listed only when it passes
+    the theme checks without font files (an app's theme uses the built-in font stacks). Returns (themes, notes).
+    """
+    out: list[dict[str, Any]] = []
+    notes: list[str] = []
+    for app in (config.apps if apps is None else apps):
+        with app.open() as folder:
+            dfd = folder.open_dir("themes")
+            if dfd is None:
+                continue
+            try:
+                with os.scandir(dfd) as it:
+                    names = sorted(e.name for e in it if e.name.endswith(".yaml") and not e.name.startswith("."))
+            finally:
+                os.close(dfd)
+            for fname in names[:40]:
+                stem = fname[: -len(".yaml")]
+                if not re.match(r"^[a-z][a-z0-9-]{0,30}\Z", stem):
+                    continue
+                got = folder.read(f"themes/{fname}", themes.MAX_THEME_BYTES, "a theme file")
+                label = app.file_label(f"themes/{fname}")
+                if isinstance(got, dict):
+                    notes.append(f"{label} was left out: {got['problem']}")
+                    continue
+                try:
+                    text = got.decode("utf-8")
+                except UnicodeDecodeError:
+                    notes.append(f"{label} was left out: it is not UTF-8 text.")
+                    continue
+                theme, errors, _w = themes.check_theme(text, file=label)
+                if theme is None or errors:
+                    notes.append(f"{label} was left out: {errors[0]['problem'] if errors else 'it is not a theme'}")
+                    continue
+                out.append({"name": f"{app.name}/{stem}", "title": theme.data.get("name", stem),
+                            "description": theme.data.get("description"), "app": app.name, "file": text})
+    return out, notes
+
+
 def use_theme(config: Any, name: str, *, force: bool = False) -> dict[str, Any]:
-    text = themes.ready_made_text(name)
+    if isinstance(name, str) and APP_THEME_RE.match(name):
+        found, _notes = app_themes(config)
+        hit = next((t for t in found if t["name"] == name), None)
+        if hit is None:
+            from easyui.errors import NotFound  # noqa: PLC0415
+
+            raise NotFound(f"None of the project's apps has a theme called {name[:70]!r}.",
+                           hint="See the themes with: easy-ui themes")
+        text = hit["file"]
+    else:
+        text = themes.ready_made_text(name)
     ui = Path(config.app_dir) / "ui"
     for p in (ui,):
         if p.is_symlink():
@@ -876,12 +930,25 @@ def _cmd_style_guide(args: argparse.Namespace) -> Any:
 def _cmd_themes(args: argparse.Namespace) -> Any:
     from easyui.cli import Result  # noqa: PLC0415
 
+    from easyui import appconfig  # noqa: PLC0415
+    from easyui.errors import EasyUIError  # noqa: PLC0415
+
     items = themes.ready_made()
     for t in items:
         t["file"] = themes.ready_made_text(t["name"])
+        t["app"] = None
+    notes: list[str] = []
+    try:  # inside a project, its apps' themes too
+        cfg = appconfig.load(getattr(args, "app_dir", None))
+        extra, notes = app_themes(cfg)
+    except EasyUIError:
+        extra = []
+    items += extra
     lines = ["Ready-made themes (copy one into ui/theme.yaml with: easy-ui theme use NAME):", ""]
-    lines += [f"  {t['name']:<12} {t['description']}" for t in items]
-    return Result({"themes": items}, "\n".join(lines))
+    lines += [f"  {t['name']:<12} {t['description']}" + (f"  (from the app {t['app']})" if t["app"] else "")
+              for t in items]
+    lines += notes
+    return Result({"themes": items, "notes": notes}, "\n".join(lines))
 
 
 def _cmd_theme_use(args: argparse.Namespace) -> Any:
@@ -911,7 +978,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     u = sub.add_parser("use", help="Copy a ready-made theme into ui/theme.yaml.",
                        description="Copy a ready-made theme (see: easy-ui themes) into ui/theme.yaml as a starting "
                        "point. An existing ui/theme.yaml is never replaced without --force.")
-    u.add_argument("name", help="the theme's name, for example dusk")
+    u.add_argument("name", help="the theme's name, for example dusk (or <app>/<name> for a theme an app ships)")
     u.add_argument("--force", action="store_true", help="replace an existing ui/theme.yaml")
     u.set_defaults(func=_cmd_theme_use)
 

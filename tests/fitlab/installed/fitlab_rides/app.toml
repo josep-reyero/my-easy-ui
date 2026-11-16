@@ -1,0 +1,17 @@
+[app]
+name = "fitlab-rides"
+title = "Rides"
+cli = "fitlab_rides.cli:app"
+
+[data]
+writes = ["activities", "days"]
+rebuild = "rebuild"
+
+[jobs.rebuild]
+run = "rebuild"
+after = "fitlab-walks.rebuild"
+timeout = "2m"
+network = false
+
+[ui.contributes.overview]
+sections = "dashboards/overview-rides.yaml"

@@ -1,0 +1,34 @@
+[project]
+name = "fitlab"
+title = "Fit lab"
+version = "0.1.0"
+apps = ["fitlab_walks", "fitlab_rides"]
+
+[tables.activities]
+key = ["id"]
+columns = { id = "text", date = "text", type = "text", distance_m = "real", duration_s = "real", ascent_m = "real" }
+
+[tables.days]
+key = ["date"]
+prefer = ["fitlab-rides"]
+[tables.days.columns]
+date = "text"
+walk_km = "real"
+ride_km = "real"
+weather = "text"
+
+[views.weekly]
+sql = """
+SELECT strftime('%Y-%W', date) AS week, type, count(*) AS activities, round(sum(distance_m) / 1000.0, 1) AS km
+FROM activities
+GROUP BY 1, 2
+"""
+
+[settings.fitlab-rides]
+jobs.rebuild.timeout = "5m"
+
+[ui]
+accent = "#2a7f62"
+dashboards = ["overview", "walks"]
+tables = ["activities", "days", "weekly", "walks_log"]
+refresh_after = ["fitlab-rides.rebuild"]

@@ -402,6 +402,8 @@ def _compose_one(slug: str, base: Part, origin: str, contributions: list[tuple[A
             for item in raw_layout:
                 if _is_anchor(item) and item["anchor"] not in anchors:
                     anchors.append(item["anchor"])
+                elif _is_anchor(item):
+                    placeable = False  # two anchors with one name: the dashboard's own check reports them
         buckets: dict[str, list[_Section]] = {"start": [], "end": []}
         for n, s in enumerate(sections):
             if not placeable:

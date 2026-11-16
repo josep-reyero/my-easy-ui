@@ -6,8 +6,9 @@ What it does:
    app's real UI state): from the project's real data file when it exists, else
    from a synthetic fixture the project may ship in ``ui/fixtures/`` (a SQLite file
    ending in ``.sqlite``, ``.sqlite3`` or ``.db``; ``--fixture`` forces the
-   fixture). When there are several, the one named like ``[ui] data`` wins,
-   else the first by name. Only the ``[ui] tables`` are copied,
+   fixture). When there are several, the one named like the shared database
+   (``<project>.sqlite``) wins, else the first by name. Only the tables
+   dashboards may read are copied,
    exactly as ``easy-ui data build`` does.
 2. Serves the dashboards straight from the working folder ``ui/dashboards/``
    on ``127.0.0.1`` only (it answers only to ``127.0.0.1:PORT`` and ``localhost:PORT``,
@@ -284,7 +285,9 @@ class WorkingSource:
         fresh = appconfig.load(self.cfg.app_dir)
         old_tables = _tables_or_none(self.cfg)
         self.cfg = PreviewConfig.wrap(fresh, self.cfg.preview_root, self.cfg.source_override)  # type: ignore[arg-type]
-        if _tables_or_none(self.cfg) != old_tables:
+        tables = _tables_or_none(self.cfg)
+        # When the apps cannot be read the composition says so; the data is rebuilt once they can be again.
+        if tables is not None and (tables != old_tables or self._data_problem is not None):
             self._rebuild_data()
 
     def _reload(self) -> None:

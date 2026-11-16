@@ -453,6 +453,11 @@ def _parse_app(config: Any, pkg: str, folder: Path, in_project: bool, data: dict
                           hint='For example: title = "Walks"')
     short = short_name(name, config.name)
     prefix = table_prefix(short)
+    if short in RESERVED_SHORT_NAMES:
+        raise ConfigError(
+            f"The app in {file} would have the short name {short!r}, which the project command keeps for itself.",
+            hint=f"Rename the app, for example {config.name}-{short}-app.",
+        )
     data_t = data.get("data", {})
     if not isinstance(data_t, dict):
         raise ConfigError(f"[data] in {file} must be a table.", hint=f'For example:\n[data]\ntables = ["{prefix}log"]')
@@ -531,11 +536,6 @@ def _check_together(config: Any, apps: list[App]) -> None:
                     hint="Rename one of the apps in its app.toml.",
                 )
             seen[word] = a.name
-        if a.short in RESERVED_SHORT_NAMES:
-            raise ConfigError(
-                f"The app {a.name} would have the short name {a.short!r}, which the project command keeps for itself.",
-                hint=f"Rename the app, for example {config.name}-{a.short}-app.",
-            )
     for a in apps:
         for b in apps:
             if a is not b and a.prefix.startswith(b.prefix):

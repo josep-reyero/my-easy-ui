@@ -1,0 +1,18 @@
+spec: easy-ui/v1
+title: Walks
+description: Every walk you saved, newest first.
+
+queries:
+  walks:
+    sql: |
+      SELECT date, km, minutes, weather FROM walks_log ORDER BY date DESC, line DESC LIMIT 100
+
+layout:
+  - - type: table
+      title: Walks
+      query: walks
+      columns:
+        - {column: date, label: Day, format: date}
+        - {column: km, label: km, format: decimal1}
+        - {column: minutes, label: Minutes, format: integer}
+        - {column: weather, label: Weather}

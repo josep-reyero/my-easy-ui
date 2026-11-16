@@ -1,12 +1,16 @@
 """The dashboard data: an immutable copy of the allowlisted tables.
 
-``easy-ui data build`` copies only the tables and views listed in
-``[ui] tables`` from the project's SQLite file into a new file under the UI
+``easy-ui data build`` copies only the tables and views dashboards may read
+(contract 4.6: the shared tables' views, the ``[views]``, then each app's
+``[ui] tables``; or ``[ui] tables`` in project.toml) from the project's shared
+database ``<data folder>/<project>.sqlite`` into a new file under the UI
 state folder (``<state>/data/bundle-<time>-<hash>.sqlite``), makes it
 read-only, writes a small JSON description next to it and then atomically
 switches the ``current`` link to it. Views are copied as plain tables (their
 rows, not their definition), so a dashboard can never reach the tables a view
-is built from. Old bundles are pruned (the newest ``keep``, default 3, stay;
+is built from: a shared table's ``<name>__rows`` never reaches dashboards, only
+its merged view does (copied with an index on its key columns, made by easy-ui
+from the column names of ``<name>__rows_key``). Old bundles are pruned (the newest ``keep``, default 3, stay;
 the current one always stays). When the data has not changed, the current
 bundle is kept and nothing is switched.
 
@@ -17,7 +21,7 @@ Public API
 ``build(config, *, keep=DEFAULT_KEEP, now=None) -> dict``
     Builds and switches. Returns ``{"bundle", "path", "built_at", "unchanged",
     "previous", "tables": {name: {"rows", "columns", "kind"}}, "pruned",
-    "size", "sha256"}``. Raises ``ConfigError`` (no ``[ui] data`` / tables),
+    "size", "sha256"}``. Raises ``ConfigError`` (nothing to copy, or the apps cannot be read),
     ``NotFound`` (no data file, or a listed table is missing),
     ``TemporaryFailure`` (another build is running), ``DataBuildError``.
 ``current_bundle(where) -> Path | None``
@@ -265,7 +269,7 @@ def _copy_table(src: sqlite3.Connection, dst: sqlite3.Connection, name: str, kin
     cur = src.execute(f"SELECT * FROM {_q(name)}")
     cols = [d[0] for d in cur.description or ()]
     if not cols:
-        raise DataBuildError(f'The table "{name}" has no columns, so it cannot be copied.', hint="Remove it from [ui] tables.")
+        raise DataBuildError(f'The table "{name}" has no columns, so it cannot be copied.', hint="Remove it from the tables dashboards read.")
     if len({c.lower() for c in cols}) != len(cols):
         raise DataBuildError(
             f'The {kind} "{name}" has two columns with the same name, so it cannot be copied for the dashboards.',

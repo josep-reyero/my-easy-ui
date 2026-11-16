@@ -552,13 +552,13 @@ class Sandbox:
             table = m.group(1)
             close = difflib.get_close_matches(table, sorted(self.tables), n=1)
             did = f' Did you mean "{close[0]}"?' if close else ""
-            return QueryError(
+            return _with_token(QueryError(
                 f'{_label(name)}reads a table called "{table}", which is not in the dashboard data.{did}',
                 hint=f"The tables available are: {', '.join(sorted(self.tables)) or '(none)'}. To add one, declare it "
                 "in project.toml ([tables] or [views]) or in an app's app.toml ([ui] tables), then run: easy-ui data "
                 "build",
                 detail=msg,
-            )
+            ), table)
         m = re.match(r'no such column: "(.*)" - should this be a string literal', msg, re.S)
         if m:
             return QueryError(

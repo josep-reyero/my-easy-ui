@@ -1,0 +1,20 @@
+spec: easy-ui/sections-v1
+sections:
+  - id: walks
+    position: after:activity
+    queries:
+      walks_per_week:
+        sql: |
+          SELECT strftime('%Y-%W', date) AS week, round(sum(distance_m) / 1000.0, 1) AS "Walked km"
+          FROM activities
+          WHERE source = 'fitlab-walks'
+            AND date > date((SELECT max(date) FROM activities), '-' || :days || ' days')
+          GROUP BY 1
+          ORDER BY 1
+    layout:
+      - - type: bar
+          title: Walking per week
+          query: walks_per_week
+          x: week
+          y: Walked km
+          format: decimal1

@@ -368,7 +368,8 @@ def catalog() -> dict[str, Any]:
             "rules": [
                 "exactly one statement starting with SELECT or WITH",
                 "parameters only as :name, and every :name must be declared under params",
-                "only the tables listed in project.toml [ui] tables can be read (see: easy-ui tables)",
+                "only the tables dashboards may read exist: the shared tables (their merged views), [views] and the "
+                "apps' [ui] tables (see: easy-ui tables)",
                 "no ATTACH, PRAGMA, writes or extension functions",
                 "text values in single quotes; double quotes are for names",
                 f"time limit {sandbox.DEFAULT_LIMITS.timeout_s:g} s, at most {sandbox.DEFAULT_LIMITS.max_rows} rows",
