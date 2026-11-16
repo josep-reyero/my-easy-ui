@@ -677,6 +677,10 @@ class _Checker:
                     stop = self.toks[self._match(k, close) - 1].end
                 if target is None:
                     return  # already reported by values()
+                if not (target.startswith("assets/") and target.lower().endswith(".woff2")):
+                    self.err(tok.line, f'This @font-face uses "{target}", which is not a .woff2 font in ui/assets/.',
+                             'Put the font in ui/assets/ as .woff2 and use url("../assets/<name>.woff2").')
+                    return
                 out.append(self.text[pos:tok.start])
                 out.append(f'url("{target}")')
                 pos = stop

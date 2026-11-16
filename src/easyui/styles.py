@@ -677,6 +677,20 @@ def use_theme(config: Any, name: str, *, force: bool = False) -> dict[str, Any]:
 # ---------------------------------------------------------------- restoring a version's files
 
 
+def _no_links_on_the_way(ui_dir: Path, rel: str) -> None:
+    """Refuse when a folder between ui/ and ``rel`` (or ``rel`` itself) is a link: writing would leave the project."""
+    parts = Path(rel).parts
+    if not parts or any(x in ("", ".", "..") for x in parts) or Path(rel).is_absolute():
+        raise Refused(f"ui/{rel} is not a file name easy-ui writes.", hint="This version's files look damaged.",
+                      code="link_refused")
+    here = ui_dir
+    for part in parts:
+        here = here / part
+        if here.is_symlink():
+            raise Refused(f"{'ui/' + str(here.relative_to(ui_dir))} is a link, so easy-ui does not write through it.",
+                          hint="Replace the link with a real folder or file, then try again.", code="link_refused")
+
+
 def restore(ui_dir: Path, wanted: dict[str, bytes], *, backup: Path) -> tuple[list[str], list[str]]:
     """Make ui/theme.yaml, ui/styles/ and ui/assets/ hold exactly ``wanted`` (path -> data).
 
@@ -698,9 +712,11 @@ def restore(ui_dir: Path, wanted: dict[str, bytes], *, backup: Path) -> tuple[li
     restored = []
     for rel, data in sorted(wanted.items()):
         target = ui_dir / rel
+        _no_links_on_the_way(ui_dir, rel)
         if target.exists() and not target.is_symlink() and target.read_bytes() == data:
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
+        _no_links_on_the_way(ui_dir, rel)  # nothing was swapped for a link while the folders were made
         tmp = target.parent / f".{target.name}.restore-{secrets.token_hex(4)}"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC, 0o644)
         try:
