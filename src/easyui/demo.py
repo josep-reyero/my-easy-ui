@@ -316,7 +316,7 @@ layout:
 """
 
 
-_TYPES = {"text": "TEXT", "integer": "INTEGER", "real": "REAL", "boolean": "INTEGER", "json": "TEXT"}
+_TYPES = {"text": "TEXT", "integer": "INTEGER", "real": "REAL", "number": "", "boolean": "INTEGER", "json": "TEXT"}
 
 
 def _q(name: str) -> str:
@@ -334,7 +334,7 @@ def schema_sql(project: dict[str, Any], app_names: list[str] | tuple[str, ...]) 
         cols = dict(d["columns"])
         lines = [f'CREATE TABLE IF NOT EXISTS {_q(t + "__rows")} (', '  "source" TEXT NOT NULL,']
         lines += [f"  {_q(k)} {_TYPES[cols[k]]} NOT NULL," for k in key]
-        lines += [f"  {_q(c)} {_TYPES[ty]}," for c, ty in cols.items() if c not in key]
+        lines += [f"  {_q(c)} {_TYPES[ty]},".replace(" ,", ",") for c, ty in cols.items() if c not in key]
         lines.append(f'  PRIMARY KEY ("source", {", ".join(_q(k) for k in key)})')
         lines.append(");")
         out += lines
