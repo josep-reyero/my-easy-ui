@@ -68,6 +68,10 @@ never taken from the request; each saved passkey keeps the RP ID it was made wit
                               gives ``{error: {code, message, hint}}`` in its own slot, so one broken
                               chart does not blank the page. All the queries of one request share
                               ``request_time_s`` (4 s); each one also has the sandbox's own limit (2 s).
+                              They run in a worker process (``easyui.workers``) that is killed when a
+                              query outlives its limit, so no query runs on past it. At most
+                              ``query_slots`` (4) requests run queries at once; another one waits at most
+                              ``slot_wait_s`` (4 s), then gets 503 ``busy`` ("try again in a few seconds").
 ``GET /api/rev``              ``{rev}``; changes when the data, the published dashboards or their look change.
 ``GET /api/styles``           ``{rev, theme_css, stylesheets: [names], app_stylesheets: [paths], assets: n}``: the look the dashboards use
                               (``problem`` when the published look is damaged; the page then keeps easy-ui's own).
@@ -96,7 +100,7 @@ Dashboards come from a *source* with the methods ``list()``, ``compiled(slug,
 today=...)``, ``dashboard(slug)``, ``bundle_path()`` and ``rev()``. By default
 it is ``easyui.publish.PublishedSource`` (the published version only); the
 preview passes ``easyui.preview.WorkingSource`` together with a
-``preview_token``. With a preview token, opening ``/?token=<token>`` (any page
+``preview_token``. With a preview token, opening (GET, never HEAD) ``/?token=<token>`` (any page
 path) signs that browser in and redirects to the same address without the
 token, so the token does not stay in the address bar or the history. A token
 works once: it is replaced at once and ``on_preview_link_used(new_token)`` is
@@ -108,7 +112,8 @@ Public API
 ``WEB_DIR``, ``DEFAULT_PORT``, ``DEFAULT_IDLE_MINUTES``, ``MAX_QUERIES_PER_REQUEST``
 ``ServerSettings`` (dataclass): ``origins`` (the public web addresses), ``local_port`` (the
     127.0.0.1 port, for local use when there are no origins), ``idle_seconds``, ``max_body``,
-    ``max_queries``, ``query_slots``, ``limits``, ``web_dir``, ``session_idle``, ``session_absolute``,
+    ``max_queries``, ``query_slots`` (also the number of query workers), ``slot_wait_s``, ``worker_idle_s``
+    (an unused worker stops after this long), ``limits``, ``web_dir``, ``session_idle``, ``session_absolute``,
     ``request_time_s``.
 ``create_app(config, settings=None, *, source=None, preview_token=None, on_preview_link_used=None, on_idle=None) -> ASGI app``
     The app has ``.easyui`` (the ``ServerState``: ``config``, ``sessions``, ``auth``, ``activity``,
@@ -167,7 +172,7 @@ from starlette.responses import (
 from starlette.routing import Mount, Route
 
 from easyui import auth as authmod
-from easyui import bundle, passkeys, paths, sandbox, security, spec, webauthn
+from easyui import bundle, passkeys, paths, sandbox, security, spec, webauthn, workers
 from easyui.appconfig import AppConfig
 from easyui.errors import (
     EasyUIError,
@@ -191,7 +196,7 @@ HEADER_TIMEOUT = 10.0  # seconds a connection may take to send a request's heade
 REQUEST_TIME_S = 4.0  # all the queries of one request share this much time
 LIMIT_CONNECTIONS = 256
 MAX_QUERIES_PER_REQUEST = spec.LIMITS["queries"]
-HEAP_LIMIT = 256_000_000
+SLOT_WAIT_S = 4.0  # how long a request waits for a free query slot before it gets "busy, try again"
 
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -231,6 +236,8 @@ class ServerSettings:
     max_body: int = security.DEFAULT_MAX_BODY
     max_queries: int = MAX_QUERIES_PER_REQUEST
     query_slots: int = 4
+    slot_wait_s: float = SLOT_WAIT_S
+    worker_idle_s: float = workers.IDLE_S
     limits: sandbox.Limits = sandbox.DEFAULT_LIMITS
     web_dir: Path = WEB_DIR
     session_idle: int = IDLE_SECONDS
@@ -301,6 +308,7 @@ class ServerState:
     preview: bool = False
     on_preview_link_used: Callable[[str], None] | None = None
     query_slots: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(4))
+    pool: workers.WorkerPool = field(default_factory=lambda: workers.WorkerPool(4))
     challenges: passkeys.Challenges = field(default_factory=passkeys.Challenges)
     clock: Callable[[], float] = time.time
     origins: security.Origins = field(default_factory=security.Origins)
@@ -895,7 +903,17 @@ async def api_query(request: Request) -> Response:
     slug = _check_slug(body.get("dashboard"))
     dash = await run_in_threadpool(st.source.dashboard, slug)
     bundle_path = await run_in_threadpool(st.source.bundle_path)
-    async with st.query_slots:
+    # A request waits a few seconds at most for a free slot, then hears "busy" (503) instead of queueing.
+    try:
+        async with asyncio.timeout(st.settings.slot_wait_s):
+            await st.query_slots.acquire()
+    except TimeoutError:
+        raise TemporaryFailure(
+            "The dashboards are busy with other requests right now, so this one was not run.",
+            hint="Try again in a few seconds.",
+            code="busy",
+        ) from None
+    try:
         out = await run_in_threadpool(
             spec.run_queries,
             dash,
@@ -906,7 +924,10 @@ async def api_query(request: Request) -> Response:
             today=_dt.date.today(),
             errors="inline",
             total_time_s=st.settings.request_time_s,
+            pool=st.pool,
         )
+    finally:
+        st.query_slots.release()
     return JSONResponse(_scrub_results(out))
 
 
@@ -1022,7 +1043,8 @@ def _file_response(request: Request, st: ServerState, base: Path, parts: list[st
 
 def _preview_sign_in(request: Request, st: ServerState) -> Response | None:
     token = request.query_params.get("token")
-    if not st.preview_token or token is None:
+    # Only a real page visit (GET) uses up the one-time link; a HEAD (a link preview, a checker) never does.
+    if not st.preview_token or token is None or request.method != "GET":
         return None
     if not hmac.compare_digest(token.encode("utf-8", "replace"), st.preview_token.encode()):
         return None  # the page then shows its sign-in screen
@@ -1109,6 +1131,8 @@ def create_app(
         preview=preview_token is not None,
         on_preview_link_used=on_preview_link_used,
         query_slots=asyncio.Semaphore(max(1, settings.query_slots)),
+        pool=workers.WorkerPool(max(1, settings.query_slots), idle_s=settings.worker_idle_s,
+                                wait_s=settings.slot_wait_s),
         challenges=passkeys.Challenges(clock),
         clock=clock,
         origins=security.Origins(settings.origins, local_port=settings.local_port),
@@ -1122,6 +1146,7 @@ def create_app(
         try:
             yield
         finally:
+            state.pool.close()
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -1427,6 +1452,47 @@ def _private(p: Path) -> bool | None:
     return (s.st_mode & 0o077) == 0 and s.st_uid == os.geteuid() and not stat.S_ISLNK(s.st_mode)
 
 
+def _group_name(gid: int) -> str:
+    try:
+        import grp  # noqa: PLC0415
+
+        return grp.getgrgid(gid).gr_name
+    except (ImportError, KeyError, OSError):
+        return str(gid)
+
+
+def _ui_group_item(config: AppConfig) -> dict[str, Any]:
+    """On a server: the ui folder, data/ and specs/ let in exactly one group, the web account's, and nobody else."""
+    st = config.state
+    expected = f"mes-{config.name}-web"
+    mine = {os.getegid(), *os.getgroups()}
+    problems = []
+    gids = set()
+    for d in (st.root, st.data, st.specs):
+        try:
+            s = os.lstat(d)
+        except OSError:
+            continue
+        gids.add(s.st_gid)
+        if stat.S_IMODE(s.st_mode) & 0o007:
+            problems.append(f"{paths.display_path(d)} lets every account in")
+        name = _group_name(s.st_gid)
+        # Run by the web account, the group must be one of its own; run by the project's account, the web one's.
+        if not (s.st_gid in mine and s.st_uid != os.geteuid()) and name != expected:
+            problems.append(f"{paths.display_path(d)} is readable by the group {name}, not {expected}")
+    if len(gids) > 1:
+        problems.append("the folders do not all belong to the same group")
+    return _item(
+        "ui_folder_group",
+        "The project's dashboard folder is readable only by the web account's group",
+        "fail" if problems else "ok",
+        "On a server the web account reads the dashboards and their data through one group; any other group or "
+        "account that can read the folder can read the dashboard data too." + (f" Found: {'; '.join(problems)}." if problems else ""),
+        f"Give the folders to that group and close them to others: chgrp -R {expected} {st.root} && chmod -R o-rwx "
+        f"{st.root}" if problems else None,
+    )
+
+
 def run_checks(config: AppConfig) -> dict[str, Any]:
     items = []
     root = os.geteuid() == 0
@@ -1472,6 +1538,9 @@ def run_checks(config: AppConfig) -> dict[str, Any]:
         )
     )
 
+    if shared:
+        items.append(_ui_group_item(config))
+
     try:
         paths.check_auth_dir(st.auth)
         status, why_not, fix = "ok", "", None
@@ -1483,6 +1552,23 @@ def run_checks(config: AppConfig) -> dict[str, Any]:
             "The sign-in folder is a real folder of this account (0700), outside the folder the project's account writes",
             status,
             "Anyone who can replace the sign-in folder can plant a password, a passkey or a session." + why_not,
+            fix,
+        )
+    )
+
+    try:
+        w = workers._Worker(workers.MEMORY_LIMIT, sandbox.HEAP_LIMIT)
+        w.kill()
+        status, fix, why_not = "ok", None, ""
+    except EasyUIError as e:
+        status, fix, why_not = "fail", e.hint, f" ({e.detail or e.message})"
+    items.append(
+        _item(
+            "query_workers",
+            "Dashboard queries can run in their own worker processes",
+            status,
+            "Every query runs in a separate process that is stopped when its time is up; without one, no dashboard "
+            "can show its numbers." + why_not,
             fix,
         )
     )
@@ -1661,7 +1747,8 @@ def _cmd_serve(args: argparse.Namespace) -> Any:
                     code="origin_needed",
                 )
             settings = ServerSettings(origins=origins, local_port=local_port, idle_seconds=idle_minutes * 60)
-            sandbox.set_heap_limit(HEAP_LIMIT)
+            security.verify_vendored(settings.web_dir)
+            sandbox.ensure_heap_limit()  # queries run in workers (easyui.workers), each with its own cap
             logging.config.dictConfig(_log_config())
             app = create_app(config, settings, on_idle=on_idle)
             if not authmod.load_hash(config.state.auth):

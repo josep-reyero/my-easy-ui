@@ -443,7 +443,7 @@ def test_publish_carries_the_look_and_serves_it_hash_checked(look_app):
     assert {e["path"] for e in manifest["styles"]} == {s["path"] for s in res["styles"]}
     for e in manifest["styles"]:
         f = vdir / e["path"]
-        assert f.is_file() and not f.is_symlink() and oct(f.stat().st_mode & 0o777) == "0o444"
+        assert f.is_file() and not f.is_symlink() and oct(f.stat().st_mode & 0o777) == "0o440"  # like every published file
     got = publish.PublishedSource(cfg).styles()
     assert got.public()["stylesheets"] == ["a.css"]
     assert got.get("styles/a.css")[0] == GOOD_CSS.encode()

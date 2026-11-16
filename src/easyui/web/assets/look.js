@@ -8,6 +8,12 @@
 // found"). The sign-in screen never has it: it is only asked for after
 // signing in. The project's stylesheets are never added to the page itself:
 // each dashboard loads them into its own document tree (dashboard.js).
+//
+// A single-file copy (easy-ui export --single-file) has no files beside it:
+// its stylesheets are inside the page (easy-ui's own in the page's style element,
+// the look in the "easyui-look" block, with every font and picture as a data:
+// address) and are added as style elements, which the page's policy allows
+// only by their hashes.
 
 import { api } from "./api.js";
 import { refreshTheme } from "./theme.js";
@@ -20,6 +26,49 @@ let info = EMPTY;
 let allowed = false;
 let themeLink = null;
 let themeReady = Promise.resolve();
+let inline = null; // address -> stylesheet text, in a single-file copy only
+
+function inlineSheets() {
+  if (inline) return inline;
+  inline = new Map();
+  const block = document.getElementById("easyui-look");
+  if (!block) return inline; // the server and a folder copy: stylesheets are files
+  const own = document.head.querySelector("style");
+  if (own) inline.set(builtinStylesheet(), own.textContent);
+  let sheets = {};
+  try {
+    sheets = JSON.parse(block.textContent) || {};
+  } catch {
+    sheets = {};
+  }
+  for (const [path, text] of Object.entries(sheets)) {
+    if (typeof text === "string" && /^ui\/[A-Za-z0-9._/-]{1,320}$/.test(path)) inline.set(new URL(path, document.baseURI).href, text);
+  }
+  return inline;
+}
+
+/**
+ * A stylesheet element for an address: a link element, or in a single-file copy a style element with the text the page
+ * carries (resolved at once; the page's policy allows it by its hash). `ready` resolves once it is in use.
+ */
+export function makeStylesheet(url) {
+  const text = inlineSheets().get(url);
+  if (typeof text === "string") {
+    const el = document.createElement("style");
+    el.textContent = text;
+    el.dataset.url = url;
+    return { el, ready: Promise.resolve() };
+  }
+  const sheet = document.createElement("link");
+  sheet.rel = "stylesheet";
+  sheet.dataset.url = url;
+  const ready = new Promise((resolve) => {
+    sheet.addEventListener("load", resolve, { once: true });
+    sheet.addEventListener("error", resolve, { once: true });
+  });
+  sheet.href = url;
+  return { el: sheet, ready };
+}
 
 function address(rel) {
   const url = new URL(rel, document.baseURI);
@@ -95,20 +144,15 @@ function sync() {
     refreshTheme();
   }
   if (want && !themeLink) {
-    const sheet = document.createElement("link");
-    sheet.rel = "stylesheet";
-    sheet.dataset.url = want;
+    const sheet = makeStylesheet(want);
     themeReady = new Promise((resolve) => {
-      const done = () => {
+      sheet.ready.then(() => {
         refreshTheme();
         resolve();
-      };
-      sheet.addEventListener("load", done, { once: true });
-      sheet.addEventListener("error", done, { once: true });
+      });
       setTimeout(resolve, 4000);
     });
-    sheet.href = want;
-    document.head.append(sheet);
-    themeLink = sheet;
+    document.head.append(sheet.el);
+    themeLink = sheet.el;
   }
 }

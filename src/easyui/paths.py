@@ -74,6 +74,9 @@ root is no longer read; an app's own app.toml is read by ``easyui.project``).
 ``readlink_nofollow(path, depth) -> str``   the target of the link ``path``, same rule for its folders.
 ``lstat_nofollow(path, depth) -> os.stat_result``  ``lstat`` of ``path``, same rule for its folders.
 ``read_nofollow(path, depth, limit) -> bytes``  a regular file's bytes (at most ``limit + 1``).
+``NotPlainFile`` (an ``OSError`` with ``reason``), ``read_plain_file(path, limit) -> bytes``
+    Reads a file the way publish does: never through a link (as the last part of the path), never a
+    FIFO, device or folder, and refused when larger than ``limit`` bytes before anything is read.
 ``auth_dir(project, ui=None) -> Path``     the sign-in folder (see below).
 ``check_auth_dir(path) -> Path``           refuses an unsafe sign-in folder (``Refused``, plain words).
 ``safe_join(base, relative, *, what) -> Path``
@@ -82,6 +85,10 @@ root is no longer read; an app's own app.toml is read by ``easyui.project``).
 ``display_path(path, base=None) -> str``
     A short form for messages: relative to ``base`` when inside it, ``~/...``
     when inside the home folder.
+``StopRequested`` (a ``KeyboardInterrupt``), ``cleanup_on_signals()``
+    A context manager: inside it, SIGTERM and SIGHUP raise ``StopRequested`` (like Ctrl-C), so the
+    ``finally`` and ``except BaseException`` blocks that remove temporary files run before the command
+    stops. Only in the main thread; elsewhere it does nothing.
 """
 
 from __future__ import annotations
@@ -89,8 +96,11 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import signal
 import stat
+import threading
 import tomllib
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -406,6 +416,40 @@ def read_nofollow(path: str | Path, depth: int, limit: int) -> bytes:
         os.close(fd)
 
 
+class NotPlainFile(OSError):
+    def __init__(self, path: str | Path, reason: str) -> None:
+        super().__init__(f"{path} {reason}")
+        self.reason = reason
+
+
+def read_plain_file(path: str | Path, limit: int) -> bytes:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | _NOFOLLOW | _CLOEXEC)
+    except OSError:
+        with contextlib.suppress(OSError):
+            if stat.S_ISLNK(os.lstat(path).st_mode):
+                raise NotPlainFile(path, "is a link to another file, which easy-ui does not follow") from None
+        raise
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise NotPlainFile(path, "is not a plain file")
+        if st.st_size > limit:
+            raise NotPlainFile(path, f"is {st.st_size} bytes, more than the {limit} bytes it may have")
+        chunks, total = [], 0
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > limit:
+                raise NotPlainFile(path, f"is larger than the {limit} bytes it may have")
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
 def _find(name: str, start: str | Path | None) -> Path | None:
     cur = Path(start or Path.cwd()).resolve()
     if cur.is_file():
@@ -447,3 +491,28 @@ def display_path(path: str | Path, base: str | Path | None = None) -> str:
         return "~/" + str(p.resolve().relative_to(Path.home().resolve()))
     except (ValueError, OSError):
         return str(p)
+
+
+class StopRequested(KeyboardInterrupt):
+    """Raised inside ``cleanup_on_signals`` when SIGTERM or SIGHUP arrives."""
+
+
+@contextlib.contextmanager
+def cleanup_on_signals() -> Iterator[None]:
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def stop(signum: int, _frame: Any) -> None:
+        raise StopRequested(f"stopped by signal {signum}")
+
+    previous = {}
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        with contextlib.suppress(OSError, ValueError):
+            previous[sig] = signal.signal(sig, stop)
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            with contextlib.suppress(OSError, ValueError, TypeError):
+                signal.signal(sig, handler)

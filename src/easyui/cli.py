@@ -209,7 +209,10 @@ def _cmd_tables(args: argparse.Namespace) -> Result:
                 hint="Run the project's jobs that write its data first (with my-easy-software: mes db sync, then the "
                 "apps' rebuild jobs).",
             )
-        tables = bundle.describe_tables(db, samples=samples, immutable=False)
+        # Sample values come only from the tables dashboards may read, unless --all-tables asks for every one:
+        # the other tables may hold what the project never meant to show.
+        tables = bundle.describe_tables(db, samples=samples, immutable=False,
+                                        samples_for=None if args.all_tables else list(cfg.tables))
         allowed = {t.lower() for t in cfg.tables}
         for t in tables:
             t["in_dashboards"] = t["name"].lower() in allowed
@@ -224,14 +227,19 @@ def _cmd_tables(args: argparse.Namespace) -> Result:
         data = {"app": cfg.name, "from": "dashboard data", "bundle": current.stem, "tables": tables}
         intro = "Tables dashboards can read (the current dashboard data):"
     lines = [intro, ""]
+    hidden = 0
     for t in tables:
         star = "* " if t.get("in_dashboards") else "  "
-        lines.append(f"{star}{t['name']} ({t['kind']}, {t['rows']} rows)")
+        lines.append(f"{star}{t['name']} ({t['kind']}, {t['rows']} rows)" + (", no sample values" if t.get("samples_hidden") else ""))
+        hidden += bool(t.get("samples_hidden"))
         for c in t["columns"]:
             sample = ", ".join(json.dumps(v, ensure_ascii=False) for v in c["samples"])
             lines.append(f"      {c['name']}  {c['type'] or '-'}" + (f"   e.g. {sample}" if sample else ""))
     if not tables:
         lines.append("  (none)")
+    if hidden and samples:
+        lines += ["", "Sample values are shown only for the tables in [ui] tables; add --all-tables to see them for "
+                  "every table."]
     return Result(data, "\n".join(lines))
 
 
@@ -328,7 +336,19 @@ def _cmd_data_build(args: argparse.Namespace) -> Result:
         text = f"The project's data has not changed since the last build, so the dashboards keep using it: {parts}."
     else:
         text = f"Built new dashboard data from the project's data file: {parts}. Open dashboards will show it on their next refresh."
+    text += "".join("\n" + line for line in table_change_lines(res.get("tables_added"), res.get("tables_removed")))
     return Result(res, text)
+
+
+def table_change_lines(added: list[str] | None, removed: list[str] | None) -> list[str]:
+    """Plain lines about a changed [ui] tables list (shown by data build and publish)."""
+    lines = []
+    if added:
+        lines.append("Dashboards can now read tables they could not read before: " + ", ".join(f"+ {t}" for t in added)
+                     + ". If that was not meant, remove them from [ui] tables in project.toml and run easy-ui data build.")
+    if removed:
+        lines.append("Dashboards can no longer read: " + ", ".join(f"- {t}" for t in removed) + ".")
+    return lines
 
 
 def _cmd_data_list(args: argparse.Namespace) -> Result:
@@ -376,6 +396,8 @@ def build_parser() -> tuple[ArgumentParser, list[str]]:
 
     p = sub.add_parser("tables", help="Tables and columns dashboards can read, with sample values.")
     p.add_argument("--source", action="store_true", help="list the project's own data file instead (marks what is copied)")
+    p.add_argument("--all-tables", action="store_true",
+                   help="with --source: show sample values for every table, not only those in [ui] tables")
     p.add_argument("--samples", type=int, default=3, help="sample values per column (0-10, default 3)")
     p.set_defaults(func=_cmd_tables)
 

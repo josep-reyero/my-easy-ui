@@ -146,7 +146,7 @@ def test_shared_ui_folder_gets_group_readable_folders_whatever_the_umask(built_a
     # The sign-in folder is beside ui/, never inside it (the project's account writes ui/).
     assert not (ui / "auth").exists() and cfg.state.auth == root / "demo" / "auth"
     assert stat.S_IMODE((root / "demo" / "auth").stat().st_mode) == 0o700
-    assert stat.S_IMODE((ui / "project.json").stat().st_mode) == 0o644
+    assert stat.S_IMODE((ui / "project.json").stat().st_mode) == 0o440
     snap = json.loads((ui / "project.json").read_text())
     assert snap == {"v": 1, "name": "demo", "title": "Demo project", "accent": "#2f6fdf",
                     "dashboards": ["overview", "activities"], "version": "0.1.0"}

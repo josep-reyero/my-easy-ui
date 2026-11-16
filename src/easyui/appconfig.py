@@ -517,7 +517,7 @@ def write_snapshot(config: AppConfig) -> None:
         pass
     fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=st.root)
     try:
-        os.fchmod(fd, 0o644)
+        os.fchmod(fd, 0o440)  # the owner and, on a server, the web account's group
         with os.fdopen(fd, "wb") as fh:
             fh.write(body)
         os.replace(tmp, st.project_file)

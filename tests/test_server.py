@@ -293,18 +293,15 @@ def test_cookie_over_https_uses_host_prefix_and_secure(env):
     assert c.get("/api/dashboards").status_code == 200
 
 
-def test_forwarded_proto_is_trusted_only_from_a_loopback_peer(env):
+def test_https_follows_the_configured_origin_not_forwarded_proto(env):
     # The proxy talks plain http to the server; the configured origin is the browser's https address.
-    trusted = env.make(client=("127.0.0.1", 40000), origins=("https://localhost",))
-    r = login(trusted, origin="https://localhost", **{"x-forwarded-proto": "https"})
-    assert r.status_code == 200
-    assert "__Host-easyui-demo" in _cookies(r)
-    assert "strict-transport-security" in r.headers
-
-    untrusted = env.make(client=("203.0.113.7", 40000), origins=("https://localhost",))
-    r = login(untrusted, origin="https://localhost", **{"x-forwarded-proto": "https"})
-    assert r.status_code == 200
-    assert "easyui-demo" in _cookies(r) and "strict-transport-security" not in r.headers
+    for peer in (("127.0.0.1", 40000), ("203.0.113.7", 40000)):
+        for headers in ({}, {"x-forwarded-proto": "https"}, {"x-forwarded-proto": "http"}):
+            c = env.make(client=peer, origins=("https://localhost",))
+            r = login(c, origin="https://localhost", **headers)
+            assert r.status_code == 200
+            assert "__Host-easyui-demo" in _cookies(r), (peer, headers)
+            assert "strict-transport-security" in r.headers
 
 
 def test_trusted_peer_rules():

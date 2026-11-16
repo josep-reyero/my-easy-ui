@@ -9,10 +9,11 @@ read-only, numbered version and atomically switches ``current`` to it::
 
     <state>/specs/
         current -> versions/7          (relative symlink, switched atomically)
-        versions/7/                    (folders 0755; files 0444, re-checked by hash on every read)
-        versions/7/manifest.json       (number, time, note, data bundle, file hashes; per dashboard
+        versions/7/                    (folders 0750 on a server, else 0700; files 0440, re-checked by hash on every read)
+        versions/7/manifest.json       (number, time, note, data bundle, tables, file hashes; per dashboard
                                         where it came from, what it replaces, its sections and sources)
         versions/7/dashboards/<slug>.yaml  (the composed file the server reads)
+        versions/7/theme.yaml, styles/, assets/, apps/<app>/...   (the look, same modes)
         versions/7/project/ui/...      (the project's own dashboard and section files, for restore)
         .publish.lock                  (one publish / rollback at a time)
 
@@ -52,7 +53,8 @@ Constants: ``KEEP_VERSIONS`` (10), ``MAX_DASHBOARDS`` (100), ``MAX_FILE_BYTES``,
     binary file object or bytes. Hostile archives raise ``Refused`` (exit 5).
     Both return ``{"published", "unchanged", "version", "previous", "app",
     "published_at", "note", "bundle", "dashboards": [{slug, title, file,
-    sha256, size}], "warnings", "pruned", "source"}`` and raise ``SpecError``
+    sha256, size}], "warnings", "pruned", "source", "tables_added", "tables_removed"}`` (the tables
+    dashboards can read now and no longer, compared with the previously published version) and raise ``SpecError``
     (with ``problems``), ``NoData``, ``NotFound`` or ``TemporaryFailure``.
 ``list_versions(where) -> dict``   ``{"current", "versions": [...]}`` newest first.
 ``rollback(where, version=None, *, now=None) -> dict``
@@ -116,7 +118,7 @@ from easyui.errors import (
 )
 
 KEEP_VERSIONS = 10
-VERSION_DIR_MODE = 0o755
+FILE_MODE = 0o440  # read by the owner and, on a server, by the web account's group; nobody else
 MAX_DASHBOARDS = 100
 MAX_FILE_BYTES = spec.LIMITS["file_bytes"]
 MAX_NOTE_LENGTH = 200
@@ -677,11 +679,19 @@ def _publish_files(
         for f, r in zip(files, results, strict=True)
     ]
     kept = [{"path": p.rel, "sha256": p.sha256, "size": len(p.data)} for p in project_files or []]
+    tables_now = sorted(bundle.bundle_info(current_bundle).get("tables") or {})
     with _locked(st):
         cur = current_version(st)
+        change: dict[str, list[str]] = {"added": [], "removed": []}
         if cur is not None:
             with contextlib.suppress(EasyUIError):
                 old = _read_manifest(_versions_dir(st) / str(cur))
+                before = old.get("tables")
+                if not isinstance(before, list) and isinstance(old.get("bundle"), str) and bundle.BUNDLE_RE.match(
+                        old["bundle"] + ".sqlite"):
+                    before = list(bundle.bundle_info(st.data / (old["bundle"] + ".sqlite")).get("tables") or {}) or None
+                if isinstance(before, list):
+                    change = bundle.table_change(before, tables_now)
                 if sorted((d["slug"], d["sha256"]) for d in old["dashboards"]) == sorted(
                     (d["slug"], d["sha256"]) for d in dashboards
                 ) and sorted((d["path"], d["sha256"]) for d in old.get("styles") or []) == style_key:
@@ -690,6 +700,7 @@ def _publish_files(
                         "published_at": old.get("published_at"), "note": old.get("note"), "bundle": current_bundle.stem,
                         "dashboards": old["dashboards"], "styles": old.get("styles") or [], "warnings": warnings,
                         "pruned": _prune(st, keep), "source": source, "notes": notes,
+                        "tables_added": change["added"], "tables_removed": change["removed"],
                     }
         nums = _version_numbers(st)
         version = (nums[-1] if nums else 0) + 1
@@ -712,6 +723,7 @@ def _publish_files(
             "note": note,
             "source": source,
             "bundle": current_bundle.stem,
+            "tables": tables_now,
             "dashboards": dashboards,
             "styles": style_entries,
             "project_files": kept,
@@ -726,29 +738,30 @@ def _publish_files(
             ddir = staging / "dashboards"
             ddir.mkdir(mode=0o700)
             for f in files:
-                fd = os.open(ddir / f"{f.slug}.yaml", os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC, 0o444)
+                fd = os.open(ddir / f"{f.slug}.yaml", os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC, FILE_MODE)
                 try:
-                    os.fchmod(fd, 0o444)  # not left to the umask: the web account (group) reads it on a server
+                    os.fchmod(fd, FILE_MODE)  # not left to the umask: the web account (group) reads it on a server
                     os.write(fd, f.data)
                     os.fsync(fd)
                 finally:
                     os.close(fd)
-            _write_styles(staging, style_files)
-            _write_project_files(staging, project_files or [])
-            mfd = os.open(staging / "manifest.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC, 0o444)
+            folder_mode = paths.dir_mode(st.root)  # 0750 on a server (the web account's group), else 0700
+            _write_styles(staging, style_files, folder_mode)
+            _write_project_files(staging, project_files or [], folder_mode)
+            mfd = os.open(staging / "manifest.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC, FILE_MODE)
             try:
-                os.fchmod(mfd, 0o444)
+                os.fchmod(mfd, FILE_MODE)
                 os.write(mfd, (json.dumps(manifest, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
                 os.fsync(mfd)
             finally:
                 os.close(mfd)
             # Files are read-only and checked against their hashes on every read. The folders stay writable
             # by their owner, so deleting the state folder to start over just works (rm -rf).
-            os.chmod(ddir, VERSION_DIR_MODE)
+            os.chmod(ddir, folder_mode)
             _verify_version_staged(staging, manifest)
             final = vd / str(version)
             os.rename(staging, final)
-            os.chmod(final, VERSION_DIR_MODE)
+            os.chmod(final, folder_mode)
         except OSError as e:
             _remove_tree(staging)
             raise TemporaryFailure(
@@ -767,12 +780,13 @@ def _publish_files(
         "published": True, "unchanged": False, "version": version, "previous": cur, "app": app,
         "published_at": manifest["published_at"], "note": note, "bundle": current_bundle.stem,
         "dashboards": dashboards, "styles": style_entries, "warnings": warnings, "pruned": pruned, "source": source,
-        "notes": notes,
+        "notes": notes, "tables_added": change["added"], "tables_removed": change["removed"],
     }
 
 
-def _write_styles(staging: Path, files: styles.StyleFiles) -> None:
-    """The theme, stylesheets and assets of a new version: files 0444, folders 0755 (like the dashboards)."""
+def _write_styles(staging: Path, files: styles.StyleFiles, folder_mode: int) -> None:
+    """The theme, stylesheets and assets of a new version: files 0440, folders ``folder_mode`` (0750 on a server,
+    else 0700), like the dashboards."""
     made: list[Path] = []
     for b in files.blobs():
         target = staging.joinpath(*b.path.split("/"))
@@ -781,19 +795,20 @@ def _write_styles(staging: Path, files: styles.StyleFiles) -> None:
             if not d.exists():
                 d.mkdir(mode=0o700)
                 made.append(d)
-        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC, 0o444)
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC, FILE_MODE)
         try:
-            os.fchmod(fd, 0o444)
+            os.fchmod(fd, FILE_MODE)
             os.write(fd, b.data)
             os.fsync(fd)
         finally:
             os.close(fd)
     for d in made:
-        os.chmod(d, VERSION_DIR_MODE)
+        os.chmod(d, folder_mode)
 
 
-def _write_project_files(staging: Path, parts: list[Any]) -> None:
-    """The project's own dashboard and sections files, under project/ (read-only, like everything published)."""
+def _write_project_files(staging: Path, parts: list[Any], folder_mode: int) -> None:
+    """The project's own dashboard and sections files, under project/ (0440 files and ``folder_mode`` folders,
+    like everything published)."""
     made: list[Path] = []
     for part in parts:
         rel = _project_file_ok(part.rel)
@@ -805,15 +820,15 @@ def _write_project_files(staging: Path, parts: list[Any]) -> None:
             if not d.exists():
                 d.mkdir(mode=0o700)
                 made.append(d)
-        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC, 0o444)
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC, FILE_MODE)
         try:
-            os.fchmod(fd, 0o444)
+            os.fchmod(fd, FILE_MODE)
             os.write(fd, part.data)
             os.fsync(fd)
         finally:
             os.close(fd)
     for d in made:
-        os.chmod(d, VERSION_DIR_MODE)
+        os.chmod(d, folder_mode)
 
 
 _PROJECT_FILE_RE = re.compile(r"^ui/(?:dashboards/[a-z0-9][a-z0-9-]{0,40}|sections/[a-z][a-z0-9-]{1,30}\.[a-z0-9][a-z0-9-]{0,40})\.yaml\Z")
@@ -1325,11 +1340,17 @@ def _published_manifest(st: paths.StatePaths) -> tuple[Path, dict[str, Any]] | N
 
 
 def list_published(where: AppConfig | paths.StatePaths) -> list[dict[str, Any]]:
-    got = _published_manifest(_state(where))
+    st = _state(where)
+    got = _published_manifest(st)
     if got is None:
         return []
-    return [{"slug": d["slug"], "title": d.get("title") or d["slug"], "description": d.get("description")}
-            for d in got[1]["dashboards"]]
+    # Titles and descriptions come from the dashboard files themselves (checked against their hashes and
+    # validated), never from the manifest's own copy, which nothing checks.
+    out = []
+    for d in got[1]["dashboards"]:
+        dash = load_published_dashboard(st, d["slug"])
+        out.append({"slug": dash.slug, "title": dash.title or dash.slug, "description": dash.description})
+    return out
 
 
 def _not_published(slug: str) -> NotFound:
@@ -1470,7 +1491,10 @@ def _cmd_publish(args: argparse.Namespace) -> Any:
         look = _look_text(res.get("styles") or [])
         text = (f"Published version {res['version']} with {n} dashboard{'s' if n != 1 else ''} ({slugs}){look}. "
                 "Open pages show it on their next refresh. To undo: easy-ui rollback")
-    lines = [text, *_warn_lines(res["warnings"]), *res["notes"]]
+    from easyui.cli import table_change_lines  # noqa: PLC0415
+
+    lines = [text, *table_change_lines(res.get("tables_added"), res.get("tables_removed")), *_warn_lines(res["warnings"]),
+             *res["notes"]]
     return Result(res, "\n".join(lines))
 
 

@@ -248,7 +248,7 @@ def test_cli_export(published, tmp_path):
     out = tmp_path / "site"
     code, stdout, _ = run_cli("export", "--out", str(out), "--set", "period=week")
     assert code == 0
-    assert "and nothing else" in stdout and "No SQL" in stdout and 'period="week"' in stdout
+    assert "and nothing else" in stdout and "No SQL" in stdout and '(period) set to "week"' in stdout
     code, data = run_cli_json("export", "--out", str(tmp_path / "locked"), "--encrypt")
     assert code == 0 and data["encrypted"] and data["fragment"].startswith("#k=")
     code, data = run_cli_json("export", "--out", str(out))

@@ -295,8 +295,14 @@ built-in fonts.
 - `easy-ui preview` reloads when anything in `ui/theme.yaml`, `ui/styles/` or `ui/assets/`,
   or in an app's `styles/` or `assets/`, changes; the page swaps in the new stylesheets without a blank moment.
 - `easy-ui export` writes the look beside the page (`ui/theme.css`, `ui/styles/`, `ui/assets/`),
-  so a shared copy looks the same. With `--encrypt` the numbers are locked but the look is not
-  (the page's policy cannot load a stylesheet from locked data); the command says so.
+  so a shared copy looks the same. With `--single-file` the look goes inside the one file: the
+  theme stylesheet and every stylesheet (each allowed by its hash in the file's own policy), with
+  the fonts and pictures they name as `data:` addresses (pictures no stylesheet names are left
+  out, and not listed). A stylesheet that uses `@import` cannot be carried that way, so a
+  single file is refused (`export_look_not_embeddable`) rather than leaving part of the look out;
+  export a folder instead. With `--encrypt` the numbers are locked but the look is not, in a
+  folder or a single file (the page's policy cannot load a stylesheet from locked data); the
+  command lists every file of the look the copy holds and says so.
 - `easy-ui screenshot` waits for the stylesheets and fonts before it takes the picture.
 
 ## Commands

@@ -55,7 +55,7 @@ def test_views_are_materialised_with_types(built_app):
 
 def test_bundle_is_read_only_and_described(built_app):
     path = bundle.require_current(built_app.config())
-    assert stat.S_IMODE(path.stat().st_mode) == 0o444
+    assert stat.S_IMODE(path.stat().st_mode) == 0o440
     info = bundle.bundle_info(path)
     assert info["bundle"] == path.stem and info["app"] == "demo" and info["source"] == "demo.sqlite"
     assert info["built_at"].endswith("Z")

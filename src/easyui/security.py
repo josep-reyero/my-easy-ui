@@ -21,10 +21,13 @@ whole app. In order, for each HTTP request it:
 2. Matches the ``Host`` header (name *and* port) against the accepted origins;
    a request under any other name or port is refused. This stops DNS
    rebinding, and pages on other ports of the same computer.
-3. Works out whether the request arrived over HTTPS (for the cookie flags):
-   the connection itself is TLS, or ``X-Forwarded-Proto: https`` was sent by a
-   *trusted* peer (the local socket or a loopback address, which is where the
-   private-network proxy connects from). From any other peer the header is ignored.
+3. Works out whether the page is on HTTPS (for the cookie flags and HSTS) from
+   the configured origin the request matched: ``https://NAME`` means HTTPS,
+   ``http://...`` means plain http. No request header (``X-Forwarded-Proto``
+   included) changes it, so a proxy that forgets the header, or a client that
+   sends it, cannot make the cookies lose ``Secure`` or change their names.
+   Only when both ``http://NAME`` and ``https://NAME`` are configured does the
+   connection itself (TLS or not) pick one.
 4. Allows only ``GET``, ``HEAD`` and ``POST``.
 5. For every state-changing request (``POST``) requires a same-origin request:
    an ``Origin`` header exactly equal to the matched configured origin, or, when
@@ -60,7 +63,7 @@ Public API
 ``split_host(value) -> (host, port | None) | None``
 ``normalize_host(value) -> str | None``  ``"Example.org:443"`` -> ``"example.org"``; None when malformed.
 ``is_trusted_peer(client) -> bool``      unix socket (no peer address) or loopback.
-``is_https(scope) -> bool``
+``is_https(scope) -> bool``               the connection itself is TLS (headers are never read).
 ``same_origin(headers, info) -> bool``
 ``is_json_content_type(value) -> bool``
 ``security_headers(path, https) -> list[tuple[bytes, bytes]]``
@@ -68,17 +71,22 @@ Public API
 ``error_body(code, message, hint) -> bytes``
 ``SecurityMiddleware(app, *, origins=Origins(), max_body=DEFAULT_MAX_BODY, body_timeout=BODY_TIMEOUT)``
 ``request_info(request) -> RequestInfo``
+``verify_vendored(web_dir) -> None``     checks the third-party page files (ECharts) against the hashes in
+    ``assets/vendor/MANIFEST.json``; raises ``Refused`` (code ``vendor_changed``) when one differs or is missing.
+    ``serve``, ``preview`` and ``export`` call it before they start.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import ipaddress
 import json
 import logging
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 log = logging.getLogger("easyui.server")
@@ -289,13 +297,7 @@ def _header(scope: dict[str, Any], name: bytes) -> str | None:
 
 
 def is_https(scope: dict[str, Any]) -> bool:
-    if scope.get("scheme") in ("https", "wss"):
-        return True
-    if is_trusted_peer(scope.get("client")):
-        proto = _header(scope, b"x-forwarded-proto")
-        if proto and proto.split(",")[0].strip().lower() == "https":
-            return True
-    return False
+    return scope.get("scheme") in ("https", "wss")
 
 
 def same_origin(headers: dict[str, str], info: RequestInfo) -> bool:
@@ -383,7 +385,7 @@ class SecurityMiddleware:
             return
 
         path = scope.get("path", "/")
-        https = is_https(scope)
+        https = is_https(scope)  # until the request has matched a configured origin, which then decides
         sent_start = False
 
         async def send_with_headers(message: dict[str, Any]) -> None:
@@ -437,6 +439,7 @@ class SecurityMiddleware:
                 "with easy-ui serve --origin https://NAME (or --allow-host NAME).",
             )
             return
+        https = site.scheme == "https"
         info = RequestInfo(https, site.host_port, str(site), is_trusted_peer(scope.get("client")), site)
         scope.setdefault("state", {})["easyui"] = info
 
@@ -540,3 +543,32 @@ class SecurityMiddleware:
                 "Something went wrong inside easy-ui while answering, so this part could not be shown.",
                 "Try again in a moment. If it keeps happening, run easy-ui check on the server and look at its log.",
             )
+
+
+# ---------------------------------------------------------------- the third-party page files
+
+
+def verify_vendored(web_dir: Path) -> None:
+    from easyui.errors import Refused  # noqa: PLC0415
+
+    vendor = Path(web_dir) / "assets" / "vendor"
+    try:
+        manifest = json.loads((vendor / "MANIFEST.json").read_text(encoding="utf-8"))
+        files = manifest["files"]
+    except (OSError, ValueError, KeyError, TypeError):
+        files = None
+    bad = []
+    for name, info in (files or {}).items():
+        try:
+            digest = hashlib.sha256((vendor / name).read_bytes()).hexdigest()
+        except OSError:
+            digest = None
+        if not isinstance(info, dict) or digest != info.get("sha256"):
+            bad.append(name)
+    if files is None or bad:
+        raise Refused(
+            "A third-party file of the dashboard page (" + (", ".join(bad) or "its list, MANIFEST.json")
+            + ") is not the one easy-ui was shipped with, so it was not used.",
+            hint="Reinstall my-easy-ui (for example: uv sync). Do not edit the files in easyui/web/assets/vendor/.",
+            code="vendor_changed",
+        )

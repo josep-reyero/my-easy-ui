@@ -31,12 +31,16 @@ Constants: ``SPEC_VERSION`` (``"easy-ui/v1"``), ``SLUG_RE``, ``NAME_RE``,
 ``load_file(path) -> Dashboard``                       raises ``SpecError`` / ``NotFound``.
 ``check(text, *, slug, file="<text>") -> (Dashboard | None, errors, warnings)``  never raises.
 ``check_partial(...)``  the same, but with mistakes it gives the parts that passed (for data checks).
-``check_with_data(dashboard, bundle_path, *, limits=..., vary=True) -> (errors, warnings)``
+``check_with_data(dashboard, bundle_path, *, limits=..., vary=True, pool=None) -> (errors, warnings)``
     Runs every query in the sandbox with the default values to learn its columns,
     then checks every column a component names. With ``vary`` it also runs each
-    query with every choice option and each int param's min and max (at most
-    ``VARY_LIMIT_S`` seconds in all), so a query that is too slow or fails for
-    another control value is caught before it is published.
+    query with every choice option, each int param's min and max and, for text
+    params, empty and the longest allowed text (at most ``VARY_LIMIT_S`` seconds
+    in all), so a query that is too slow or fails for another control value is
+    usually caught before it is published. (A query that is slow only for one
+    particular text cannot be found this way; at run time it is still stopped
+    at its time limit.) The queries run in a worker process (``easyui.workers``;
+    ``pool`` defaults to ``workers.default_pool()``).
 ``validate_file(path, *, bundle=None, file_label=None) -> dict``
     ``{"file", "slug", "title", "ok", "errors": [...], "warnings": [...]}``.
 ``validate_app(config, files=None, *, check_data=True) -> dict``
@@ -48,10 +52,11 @@ Constants: ``SPEC_VERSION`` (``"easy-ui/v1"``), ``SLUG_RE``, ``NAME_RE``,
     default. Raises ``ParamError`` (HTTP 400) for unknown names or bad values.
 ``compile_dashboard(dashboard, *, today=None) -> dict``
     The form sent to the browser (no SQL). See docs/SPEC.md, "Compiled form".
-``run_queries(dashboard, names, params=None, *, bundle_path, limits=..., today=None, errors="raise", total_time_s=None) -> dict``
+``run_queries(dashboard, names, params=None, *, bundle_path, limits=..., today=None, errors="raise", total_time_s=None, pool=None) -> dict``
     Runs named queries with typed, bound params: ``{"results": {name: {"columns",
     "rows", "truncated"}}}``. ``total_time_s`` is one time budget shared by all
-    the queries (each also keeps ``limits.timeout_s``). With ``errors="inline"`` a failing query gives
+    the queries (each also keeps ``limits.timeout_s``). They run in a worker process from ``pool``
+    (default ``workers.default_pool()``) that is killed when a query outlives its time. With ``errors="inline"`` a failing query gives
     ``{"error": {"code", "message", "hint"}}`` in its place instead of raising.
 ``default_values(dashboard, *, today=None) -> dict``  every param's default, date rules worked out.
 ``resolve_date_rule(rule, today) -> date``            ``"today-90d"`` etc.
@@ -75,7 +80,7 @@ from urllib.parse import urlsplit
 
 import yaml
 
-from easyui import formats, paths, sandbox
+from easyui import formats, paths, sandbox, workers
 from easyui.errors import EasyUIError, NotFound, ParamError, QueryTimeout, SpecError
 
 SPEC_VERSION = "easy-ui/v1"
@@ -1623,10 +1628,20 @@ def loads(text: str, *, slug: str, file: str = "<text>") -> Dashboard:
 
 
 def _read(path: Path) -> str:
+    """A dashboard file, read like publish reads it: no links, no FIFOs or devices, the size checked first."""
     try:
-        return path.read_text(encoding="utf-8")
+        data = paths.read_plain_file(path, LIMITS["file_bytes"])
     except FileNotFoundError:
         raise NotFound(f"There is no dashboard file {paths.display_path(path)}.", hint="Check the file name; dashboards live in ui/dashboards/.") from None
+    except paths.NotPlainFile as e:
+        raise SpecError(f"The dashboard file {paths.display_path(path)} {e.reason}, so easy-ui does not read it.",
+                        hint="Dashboards must be ordinary text files (not links), each at most "
+                        f"{LIMITS['file_bytes']} bytes.") from None
+    except OSError as e:
+        raise SpecError(f"The dashboard file {paths.display_path(path)} could not be opened ({e.strerror}).",
+                        hint="Check that the file is readable.") from None
+    try:
+        return data.decode("utf-8")
     except UnicodeDecodeError:
         raise SpecError(f"The dashboard file {paths.display_path(path)} is not UTF-8 text.", hint="Save it as UTF-8 text.") from None
 
@@ -1669,7 +1684,8 @@ VARY_LIMIT_S = 20.0  # at most this long trying the other control values of all 
 
 
 def _variations(dash: Dashboard, q: Query, base: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
-    """Other control values worth trying at publish: each choice option, and each int's min and max."""
+    """Other control values worth trying at publish: each choice option, each int's min and max, and for text
+    the empty text and the longest text allowed."""
     out = []
     for name in q.params:
         p = dash.params.get(name)
@@ -1680,23 +1696,34 @@ def _variations(dash: Dashboard, q: Query, base: dict[str, Any]) -> list[tuple[s
             values = [o["value"] for o in (p.options or [])][:12]
         elif p.type == "int":
             values = [v for v in (p.min, p.max) if v is not None]
+        elif p.type == "text":
+            values = ["", "x" * LIMITS["text_param_length"]]
         for v in values:
             if v == base.get(name):
                 continue
             label = next((o["label"] for o in (p.options or []) if o["value"] == v), v) if p.type == "choice" else v
+            if p.type == "text":
+                label = "empty text" if v == "" else f"a text of {len(v)} characters"
             out.append((f'With "{p.label}" set to {label}, ', {**base, name: v}))
     return out
 
 
 def check_with_data(
-    dash: Dashboard, bundle_path: str | Path, *, limits: sandbox.Limits = sandbox.DEFAULT_LIMITS, vary: bool = True
+    dash: Dashboard,
+    bundle_path: str | Path,
+    *,
+    limits: sandbox.Limits = sandbox.DEFAULT_LIMITS,
+    vary: bool = True,
+    pool: workers.WorkerPool | None = None,
 ) -> tuple[list[Problem], list[Problem]]:
     ctx = _Ctx(dash.file, dash.lines, origin=dash.origin)
     values = default_values(dash)
     cols: dict[str, list[str]] = {}
     started = time.monotonic()
     skipped = 0
-    with sandbox.Sandbox(bundle_path, limits) as sb:
+    # Preparing a query can take long or a lot of memory without SQLite checking the time, so even the
+    # checks run in a worker process that is stopped when its time is up (easyui.workers).
+    with (pool or workers.default_pool()).session(bundle_path, limits) as sb:
         for name, q in dash.queries.items():
             try:
                 cols[name] = sb.columns(q.sql, {k: values.get(k) for k in q.params}, name=name)
@@ -1742,7 +1769,11 @@ def validate_file(path: str | Path, *, bundle: str | Path | None = None, file_la
     except EasyUIError as e:
         entry["errors"] = [Problem(label, "", e.message, None, e.hint).to_dict()]
         return entry
-    entry["slug"] = slug
+    return _validate_text(text, slug, label, bundle)
+
+
+def _validate_text(text: str, slug: str, label: str, bundle: str | Path | None) -> dict[str, Any]:
+    entry: dict[str, Any] = {"file": label, "slug": slug, "title": None, "ok": False, "errors": [], "warnings": []}
     dash, errors, warnings = check_partial(text, slug=slug, file=label)
     if dash is not None and bundle is not None:
         e2, w2 = check_with_data(dash, bundle, vary=not errors)
@@ -1757,10 +1788,10 @@ def validate_file(path: str | Path, *, bundle: str | Path | None = None, file_la
 
 def _validate_any_file(path: Path, *, bundle: Path | None, label: str) -> dict[str, Any]:
     """One file named on the command line: a dashboard, or a sections file (checked on its own)."""
-    try:
-        head = path.read_bytes()[:4096].decode("utf-8", "replace")
+    try:  # read like every dashboard file: no links, no FIFOs or devices, the size checked first
+        head = paths.read_plain_file(path, LIMITS["file_bytes"])[:4096].decode("utf-8", "replace")
     except OSError:
-        head = ""
+        head = ""  # validate_file then says why the file cannot be read
     if re.search(r"^spec:\s*['\"]?easy-ui/sections-v1", head, re.M):
         from easyui import compose  # noqa: PLC0415
 
@@ -1921,6 +1952,7 @@ def run_queries(
     today: _dt.date | None = None,
     errors: str = "raise",
     total_time_s: float | None = None,
+    pool: workers.WorkerPool | None = None,
 ) -> dict[str, Any]:
     if not isinstance(names, list) or not names or not all(isinstance(n, str) for n in names):
         raise ParamError("Say which queries to run, as a list of names.", hint=f"This dashboard's queries are: {', '.join(dash.queries)}.")
@@ -1935,7 +1967,8 @@ def run_queries(
     # One request shares one time budget, the same way it shares the size budget, so a page
     # with many slow queries cannot hold the server for (queries x time limit).
     deadline = time.monotonic() + total_time_s if total_time_s is not None else None
-    with sandbox.Sandbox(bundle_path, limits) as sb:
+    # Every query runs in a worker process that is killed when its time is up (easyui.workers).
+    with (pool or workers.default_pool()).session(bundle_path, limits) as sb:
         for n in unique:
             q = dash.queries[n]
             timeout = limits.timeout_s

@@ -38,6 +38,8 @@ Public API
     ``target`` is ``"assets/<path>"`` or ``"styles/<name>"``.
 ``check_stylesheet(text, *, file, name, stylesheets, assets, classes, properties, data_types) -> CssCheck``
 ``scope_stylesheet(text, app) -> str``   an app's stylesheet limited to elements marked ``data-app="<app>"``.
+``inline_refs(text, target_of, data_url) -> (text | None, why | None)``   every file a stylesheet names put inside
+    it as a ``data:`` address (a single-file export); refuses ``@import``.
 ``app_at_rule_problems(text, *, file) -> list``   at-rules an app's stylesheet may not use (``@scope``, ``@page``).
 ``CssCheck`` (dataclass): ``errors``, ``warnings`` (problem dicts like ``spec.Problem.to_dict()``),
     ``font_faces`` (each ``@font-face`` rule as CSS text, its urls rewritten relative to ``ui/``),
@@ -973,3 +975,56 @@ def scope_stylesheet(text: str, app: str) -> str:
         pos = b
     out.append(s[pos:])
     return "".join(out)
+
+
+def inline_refs(text: str, target_of: Any, data_url: Any) -> tuple[str | None, str | None]:
+    """A checked stylesheet with every file it names put inside it, for a single-file export.
+
+    Every ``url()`` (quoted or not) and every string of ``image-set()``, ``image()`` and ``cross-fade()`` becomes a
+    ``data:`` address of the file it names. ``target_of(ref)`` says which served file a reference names (``None``
+    when it names none); ``data_url(target)`` gives that file as a ``data:`` address (``None`` when the look has no
+    such file). Returns ``(text, None)``, or ``(None, why)`` when the stylesheet cannot be carried in one file:
+    an ``@import`` (a single file's policy allows only the stylesheets it holds), or a reference to no file.
+    """
+    s = text.replace("\r\n", "\n").replace("\r", "\n").replace("\f", "\n")
+    toks = tokenize(s)
+    edits: list[tuple[int, int, str]] = []
+    stack: list[str] = []  # the functions (and plain brackets, as "") open at each token
+
+    def address(ref: str, line: int) -> tuple[str | None, str | None]:
+        target = target_of(ref)
+        got = data_url(target) if target is not None else None
+        if got is None:
+            return None, f'line {line} names "{ref[:80]}", which is not a file of the look'
+        return got, None
+
+    for t in toks:
+        if t.kind == "at-keyword" and t.value.lower() == "import":
+            return None, f"line {t.line} uses @import"
+        if t.kind in ("bad-url", "comment-unclosed", "bad-string"):
+            return None, f"line {t.line} is not written correctly"
+        if t.kind == "function":
+            stack.append(t.value.lower())
+        elif t.kind == "(":
+            stack.append("")
+        elif t.kind == ")":
+            if stack:
+                stack.pop()
+        elif t.kind == "url":
+            got, why = address(t.value, t.line)
+            if why:
+                return None, why
+            edits.append((t.start, t.end, f'url("{got}")'))
+        elif t.kind == "string" and stack and (stack[-1] == "url" or stack[-1] in URL_STRING_FUNCTIONS):
+            got, why = address(t.value, t.line)
+            if why:
+                return None, why
+            edits.append((t.start, t.end, f'"{got}"'))
+    out = []
+    pos = 0
+    for a, b, new in edits:
+        out.append(s[pos:a])
+        out.append(new)
+        pos = b
+    out.append(s[pos:])
+    return "".join(out), None

@@ -192,8 +192,14 @@ Rules (checked by `easy-ui validate` and again by the server for every request):
 - no `ATTACH`, `PRAGMA` (also not `pragma_*` functions), no writes or schema changes, no
   `sqlite_master`, `dbstat` or extension functions such as `load_extension` or `readfile`;
 - text values go in single quotes (`'run'`); double quotes are for names (`"Distance"`);
+- at most 10 named parts (`WITH name AS (...)`, `WINDOW name AS (...)`), and a part may not
+  take the name of a table or of something SQLite has built in (`sqlite_...`, `pragma_...`,
+  `json_each`, `dbstat`, ...);
+- one value (a piece of text) may be at most 200 KB, a query may use at most 64 MB of memory and
+  return at most 100 columns, and a `LIKE` pattern may be at most 300 characters;
 - each query has a time limit (2 seconds by default) and returns at most 5000 rows (and about
-  5 MB); beyond that the result is cut and marked `truncated`.
+  5 MB); beyond that the result is cut and marked `truncated`. A query that is still running
+  when its time is up is stopped (its worker process is killed), whatever it is doing.
 
 `WITH RECURSIVE`, window functions, `json_each` / `json_tree` and SQLite's built-in functions all
 work. Name result columns the way they should appear on the page: `steps AS "Steps per day"`.
@@ -347,8 +353,10 @@ browser renderer is tested against, is `easyui.formats.FORMATS`.
 data has been built (`easy-ui data build`) it also runs each query with the default values to
 check the tables and every column a component names, also in a file that has other mistakes, so
 one round shows them all. `easy-ui publish` (and the preview) also runs each query with every
-choice option and each int param's `min` and `max`, so a query that is too slow or fails for
-another control value is caught before anyone sees it. Each problem says where it is and what
+choice option, each int param's `min` and `max`, and an empty and a 200-character text for each
+text param, so a query that is too slow or fails for another control value is usually caught
+before anyone sees it (one that is slow only for one particular text is still stopped at its
+time limit). Each problem says where it is and what
 to do:
 
 ```json

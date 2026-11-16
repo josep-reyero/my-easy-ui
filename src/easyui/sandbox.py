@@ -7,11 +7,18 @@ these layers:
 1. Static check of the SQL text (``scan_sql``): exactly one statement that
    starts with SELECT, WITH or VALUES; parameters only as ``:name``; no
    unclosed quotes or comments.
+   At most ``MAX_CTES`` ``WITH`` parts, and a ``WITH`` part may not take the name
+   of a database table, of SQLite's own tables (``sqlite_*``), of a PRAGMA
+   (``pragma_*``) or of a built-in table function (``RESERVED_NAMES``).
 2. The file is opened read-only and immutable (``mode=ro&immutable=1``),
    extension loading is switched off, the connection is put in SQLite's
    defensive mode with untrusted schema, double-quoted strings are refused,
    no other database may be attached (``SQLITE_LIMIT_ATTACHED = 0``) and the
-   statement size, value size, expression depth and so on are limited.
+   statement size, one value's size (``MAX_VALUE_BYTES``, 200 KB), LIKE
+   patterns, compound SELECTs, expression depth, columns and so on are
+   limited. Temporary data (sorting, grouping) stays in memory
+   (``temp_store = MEMORY``), never in files, and SQLite's memory is capped
+   (``HEAP_LIMIT``, 64 MB, set for the whole process by every ``Sandbox``).
 3. An authorizer allows only SELECT, READ, FUNCTION and RECURSIVE (the
    ``WITH RECURSIVE`` part of a SELECT). READ is allowed only on the bundle's
    own tables plus the ``json_each`` / ``json_tree`` table functions.
@@ -23,7 +30,14 @@ these layers:
    None, int, float or text.
 5. A progress handler stops a query that runs longer than the time limit
    (default 2 s), and results stop at the row limit (default 5000) or the
-   size limit (default 5 MB); then ``truncated`` is true.
+   size limit (default 5 MB); then ``truncated`` is true. Rows are fetched
+   one at a time and counted against the size limit as they arrive.
+
+The progress handler only runs between SQLite's steps, so one long step (a
+LIKE or ``instr`` over long text, or preparing a query that expands badly)
+is not stopped by it. That is why the server, ``validate``, ``publish`` and
+``export`` never use this module directly: they run every query through
+``easyui.workers``, in a separate process that is killed when its time is up.
 
 Public API
 ----------
@@ -48,17 +62,21 @@ Public API
     ``columns(sql, params=None, *, name=None) -> list[str]`` (prepares and
     starts the query to learn its column names, fetches nothing; missing
     parameters are bound as NULL). ``tables`` is the set of readable tables.
+``Sandbox(bundle_path=None, limits=DEFAULT_LIMITS, *, fd=None)`` also takes an open, read-only
+    descriptor of the bundle instead of a path (what a query worker receives).
+``HEAP_LIMIT`` (64 MB), ``MAX_VALUE_BYTES`` (200 KB), ``MAX_CTES``, ``RESERVED_NAMES``
 ``set_heap_limit(nbytes) -> int``
     Sets SQLite's process-wide hard heap limit (``PRAGMA hard_heap_limit``),
     so one heavy query cannot take all memory; returns the previous limit.
-    The server should call it once at start-up (e.g. 256 MB). 0 removes it.
+    0 removes it. Every ``Sandbox`` lowers the limit to ``HEAP_LIMIT`` when it
+    is unset or higher, so each command gets it without having to ask.
 ``run_query(bundle_path, sql, params=None, *, name=None, limits=DEFAULT_LIMITS) -> QueryResult``
 ``query_columns(bundle_path, sql, params=None, *, name=None, limits=DEFAULT_LIMITS) -> list[str]``
     One-shot helpers (open, run, close). ``query_columns`` is what validation
     uses to check a dashboard query against the current data.
 
 Errors raised: ``QueryRefused`` (exit 5 / HTTP 400) when a layer refuses the
-query, ``QueryTimeout`` (exit 75 / HTTP 504) when the time limit is hit,
+query or it needs more memory than allowed, ``QueryTimeout`` (exit 75 / HTTP 504) when the time limit is hit,
 ``QueryError`` (exit 1 / HTTP 400) when SQLite cannot run it (typo, missing
 table or column), ``ParamError`` (HTTP 400) for unusable parameter values,
 ``NoData`` when the bundle file does not exist.
@@ -101,18 +119,31 @@ SAFE_TABLE_FUNCTIONS = frozenset({"json_each", "json_tree"})
 ALLOWED_KEYWORDS = ("SELECT", "WITH", "VALUES")
 MAX_SQL_LENGTH = 20_000
 MAX_PARAM_TEXT = 10_000
+MAX_CTES = 10
+MAX_VALUE_BYTES = 200_000
+HEAP_LIMIT = 64_000_000
 PROGRESS_STEPS = 1_000
+# Names a WITH part may never take: SQLite's own tables and PRAGMAs (by prefix) and the table functions and
+# virtual tables SQLite may have built in. Each Sandbox adds the bundle's tables and the modules it finds.
+RESERVED_PREFIXES = ("sqlite_", "pragma_")
+RESERVED_NAMES = frozenset(
+    {
+        "json_each", "json_tree", "jsonb_each", "jsonb_tree", "dbstat", "generate_series", "carray", "completion",
+        "bytecode", "tables_used", "fts3tokenize", "fts4aux", "fts5vocab", "rtree", "rtree_i32", "geopoly",
+        "zipfile", "sqlar", "fsdir", "csv", "series", "stmt",
+    }
+)  # fmt: skip
 
 _LIMITS = {
     "SQLITE_LIMIT_ATTACHED": 0,
-    "SQLITE_LIMIT_LENGTH": 5_000_000,
+    "SQLITE_LIMIT_LENGTH": MAX_VALUE_BYTES,
     "SQLITE_LIMIT_SQL_LENGTH": MAX_SQL_LENGTH * 2,
-    "SQLITE_LIMIT_COLUMN": 500,
-    "SQLITE_LIMIT_EXPR_DEPTH": 200,
-    "SQLITE_LIMIT_COMPOUND_SELECT": 50,
+    "SQLITE_LIMIT_COLUMN": 100,
+    "SQLITE_LIMIT_EXPR_DEPTH": 100,
+    "SQLITE_LIMIT_COMPOUND_SELECT": 20,
     "SQLITE_LIMIT_VDBE_OP": 250_000,
     "SQLITE_LIMIT_FUNCTION_ARG": 32,
-    "SQLITE_LIMIT_LIKE_PATTERN_LENGTH": 1_000,
+    "SQLITE_LIMIT_LIKE_PATTERN_LENGTH": 300,  # a text control (200 characters) between two %
     "SQLITE_LIMIT_VARIABLE_NUMBER": 100,
     "SQLITE_LIMIT_TRIGGER_DEPTH": 1,
     "SQLITE_LIMIT_WORKER_THREADS": 0,
@@ -161,6 +192,20 @@ class SqlScan:
     ctes: list[str] = field(default_factory=list)
 
 
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def ascii_lower(name: str) -> str:
+    """Lower case the way SQLite compares names (ASCII letters only)."""
+    return name.translate(_ASCII_LOWER)
+
+
+def reserved_name(name: str) -> bool:
+    """True for a name a WITH part may never take (see ``RESERVED_NAMES``)."""
+    low = ascii_lower(name)
+    return low.startswith(RESERVED_PREFIXES) or low in RESERVED_NAMES
+
+
 def _cte_names(tokens: list[tuple[str, str]]) -> list[str]:
     """Names defined as ``name [(cols)] AS [NOT] [MATERIALIZED] (``."""
     names: list[str] = []
@@ -184,8 +229,8 @@ def _cte_names(tokens: list[tuple[str, str]]) -> list[str]:
         j += 1
         while j < len(tokens) and tokens[j][0] == "word" and tokens[j][1].upper() in ("NOT", "MATERIALIZED"):
             j += 1
-        if j < len(tokens) and tokens[j] == ("punct", "(") and text.lower() not in names:
-            names.append(text.lower())
+        if j < len(tokens) and tokens[j] == ("punct", "(") and ascii_lower(text) not in names:
+            names.append(ascii_lower(text))
     return names
 
 
@@ -305,6 +350,17 @@ def scan_sql(sql: Any) -> SqlScan:
         out.problems.append("The query has no statement in it (only comments). Write one SELECT statement.")
     out.params = seen
     out.ctes = _cte_names(tokens)
+    if len(out.ctes) > MAX_CTES:
+        out.problems.append(
+            f"The query has {len(out.ctes)} named parts (WITH ... AS or WINDOW ... AS), more than the {MAX_CTES} a "
+            "dashboard query may have. Make it simpler, or split it into two queries."
+        )
+    shadow = next((c for c in out.ctes if reserved_name(c)), None)
+    if shadow is not None:
+        out.problems.append(
+            f'The query names a part "{shadow}", which is the name of something SQLite has built in. Give that part '
+            "another name."
+        )
     return out
 
 
@@ -393,14 +449,19 @@ def _fd_path(fd: int) -> str:
 class Sandbox:
     """One sandboxed, read-only connection to a data bundle."""
 
-    def __init__(self, bundle_path: str | Path, limits: Limits = DEFAULT_LIMITS) -> None:
-        path = Path(os.path.abspath(bundle_path))
-        # The bundle and its folder are opened without following links (on a server another account writes
-        # them), and SQLite reads the file through that open descriptor.
-        try:
-            self._fd = paths.open_nofollow(path, 2)
-        except OSError:
-            self._fd = -1
+    def __init__(self, bundle_path: str | Path | None = None, limits: Limits = DEFAULT_LIMITS, *, fd: int | None = None) -> None:
+        if fd is not None:
+            # An open descriptor handed over by the parent process (easyui.workers); this Sandbox owns it now.
+            self._fd = fd
+            path = Path(_fd_path(fd))
+        else:
+            path = Path(os.path.abspath(bundle_path or ""))
+            # The bundle and its folder are opened without following links (on a server another account writes
+            # them), and SQLite reads the file through that open descriptor.
+            try:
+                self._fd = paths.open_nofollow(path, 2)
+            except OSError:
+                self._fd = -1
         if self._fd < 0 or not stat.S_ISREG(os.fstat(self._fd).st_mode):
             if self._fd >= 0:
                 os.close(self._fd)
@@ -408,6 +469,11 @@ class Sandbox:
                 "There is no dashboard data yet, so the dashboards have nothing to show.",
                 hint="Build it with: easy-ui data build",
             )
+        try:
+            ensure_heap_limit()
+        except BaseException:
+            os.close(self._fd)
+            raise
         self.path = path
         self.limits = limits
         self._deadline = math.inf
@@ -432,13 +498,20 @@ class Sandbox:
                 if op is not None:
                     self.conn.setlimit(op, value)
             self.conn.execute("PRAGMA query_only = ON")
+            # Sorting and grouping never spill into temporary files: they stay in memory, under HEAP_LIMIT.
+            self.conn.execute("PRAGMA temp_store = MEMORY")
             self.tables = frozenset(
                 r[0]
                 for r in self.conn.execute(
                     "SELECT name FROM sqlite_schema WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'"
                 )
             )
-            self._readable = frozenset(t.lower() for t in self.tables) | SAFE_TABLE_FUNCTIONS
+            self._readable = frozenset(ascii_lower(t) for t in self.tables) | SAFE_TABLE_FUNCTIONS
+            modules: set[str] = set()
+            with contextlib.suppress(sqlite3.Error):
+                modules = {ascii_lower(r[0]) for r in self.conn.execute("SELECT name FROM pragma_module_list")}
+            # A WITH part may not take any of these names (see _execute).
+            self._taken = frozenset(ascii_lower(t) for t in self.tables) | modules
             # Column names, for "did you mean" in messages (read before the authorizer is set).
             self.columns_by_table: dict[str, list[str]] = {}
             for t in sorted(self.tables):
@@ -464,11 +537,13 @@ class Sandbox:
                 return sqlite3.SQLITE_DENY
             return sqlite3.SQLITE_OK
         if what == "READ":
-            table = (a1 or "").lower()
+            table = ascii_lower(a1 or "")
             if db in (None, "main") and table in self._readable:
                 return sqlite3.SQLITE_OK
-            # "count(*) FROM <cte>" reports a READ of the CTE's name with no column and no database.
-            if a2 == "" and db is None and table in self._ctes:
+            # "count(*) FROM <cte>" reports a READ of the CTE's name with no column and no database. A WITH part
+            # can never take the name of a real table, of SQLite's own tables or of a table function (refused in
+            # scan_sql and _execute), so this name is always the query's own part, never something real.
+            if a2 == "" and db is None and table in self._ctes and not reserved_name(table) and table not in self._taken:
                 return sqlite3.SQLITE_OK
             if table.startswith("pragma_"):
                 self._denied.append("use a PRAGMA (a database setting), which dashboards may not use")
@@ -512,6 +587,13 @@ class Sandbox:
                 hint="Fix the query in the dashboard file, then run: easy-ui validate",
             )
         needed = scan.params
+        shadow = next((c for c in scan.ctes if c in self._taken), None)
+        if shadow is not None:
+            raise QueryRefused(
+                f'{_label(name)}cannot be used: it names a part "{shadow}", which is already the name of a table or '
+                "of something SQLite has built in. Give that part another name.",
+                hint="Rename the part after WITH, then run: easy-ui validate",
+            )
         self._ctes = frozenset(scan.ctes)
         if fill_missing:
             params = {k: (params or {}).get(k) for k in needed}
@@ -522,6 +604,8 @@ class Sandbox:
             return self.conn.execute(sql, bound)
         except (sqlite3.Error, OverflowError) as e:
             raise self._translate(e, name) from None
+        except MemoryError:
+            raise _too_big(name) from None
 
     def _translate(self, e: Exception, name: str | None) -> Exception:
         msg = str(e)
@@ -609,25 +693,23 @@ class Sandbox:
             rows: list[list[Any]] = []
             size = 0
             truncated, reason = False, None
-            batch = min(500, self.limits.max_rows + 1)
-            while True:
-                chunk = cur.fetchmany(batch)
-                if not chunk:
+            # One row at a time, each counted against the size limit as it arrives: SQLite never hands over
+            # more than one row (at most SQLITE_LIMIT_COLUMN values of MAX_VALUE_BYTES each) beyond the limit.
+            for row in cur:
+                if len(rows) >= self.limits.max_rows:
+                    truncated, reason = True, "rows"
                     break
-                for row in chunk:
-                    if len(rows) >= self.limits.max_rows:
-                        truncated, reason = True, "rows"
-                        break
-                    clean = [_clean(v) for v in row]
-                    size += 2 + sum(_size(v) for v in clean)
-                    if size > self.limits.max_bytes:
-                        truncated, reason = True, "size"
-                        break
-                    rows.append(clean)
-                if truncated:
+                clean = [_clean(v) for v in row]
+                size += 2 + sum(_size(v) for v in clean)
+                if size > self.limits.max_bytes:
+                    truncated, reason = True, "size"
                     break
+                rows.append(clean)
         except sqlite3.Error as e:
             raise self._translate(e, name) from None
+        except MemoryError:
+            rows = []
+            raise _too_big(name) from None
         finally:
             cur.close()
             self._deadline = math.inf
@@ -643,6 +725,14 @@ class Sandbox:
             self._deadline = math.inf
 
 
+def _too_big(name: str | None) -> QueryRefused:
+    return QueryRefused(
+        f"{_label(name)}needs more memory than a dashboard query may use, so it was stopped.",
+        hint="Ask for less data (fewer rows, shorter text) or simplify the query.",
+        code="query_too_big",
+    )
+
+
 def _with_token(e: QueryError, token: str) -> QueryError:
     """Remember the piece of SQL a message is about, so validation can point at its line."""
     e.token = token  # type: ignore[attr-defined]
@@ -655,6 +745,17 @@ def set_heap_limit(nbytes: int) -> int:
         previous = conn.execute("PRAGMA hard_heap_limit").fetchone()[0]
         conn.execute(f"PRAGMA hard_heap_limit = {int(nbytes)}")
         return int(previous)
+    finally:
+        conn.close()
+
+
+def ensure_heap_limit(nbytes: int = HEAP_LIMIT) -> None:
+    """Lower SQLite's process-wide memory cap to ``nbytes`` when it is unset or higher."""
+    conn = sqlite3.connect(":memory:")
+    try:
+        current = int(conn.execute("PRAGMA hard_heap_limit").fetchone()[0])
+        if current == 0 or current > nbytes:
+            conn.execute(f"PRAGMA hard_heap_limit = {int(nbytes)}")
     finally:
         conn.close()
 

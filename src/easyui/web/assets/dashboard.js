@@ -15,7 +15,7 @@ import { api, describe } from "./api.js";
 import { Stat, Table, TextBlock, Controls, componentProps, APP_NAME } from "./components.js";
 import { Chart } from "./charts.js";
 import { applyOverrides, isDark, onThemeChange } from "./theme.js";
-import { builtinStylesheet } from "./look.js";
+import { builtinStylesheet, makeStylesheet } from "./look.js";
 
 const BASIS = { stat: 9.5, line: 20, area: 20, bar: 20, table: 24, text: 18 }; // rem
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
@@ -122,25 +122,22 @@ export class DashboardView {
     const key = wanted.join("\n");
     if (key === this.sheetsKey) return this.ready;
     this.sheetsKey = key;
-    const old = Array.from(this.sheets.querySelectorAll("link[data-project]"));
-    const links = [];
+    const old = Array.from(this.sheets.querySelectorAll("[data-project]"));
+    const sheets = [];
     if (!this.builtin) {
-      this.builtin = this.makeSheet(builtinStylesheet());
-      links.push(this.builtin);
+      const own = makeStylesheet(builtinStylesheet());
+      this.builtin = own.el;
+      sheets.push(own);
       this.host.style.setProperty("visibility", "hidden"); // only before the very first styles
     }
-    const added = wanted.map((url) => {
-      const sheet = this.makeSheet(url);
-      sheet.dataset.project = "";
-      return sheet;
-    });
-    links.push(...added);
-    const loaded = links.map((sheet) => new Promise((resolve) => {
-      sheet.addEventListener("load", resolve, { once: true });
-      sheet.addEventListener("error", resolve, { once: true });
-    }));
+    for (const url of wanted) {
+      const sheet = makeStylesheet(url);
+      sheet.el.dataset.project = "";
+      sheets.push(sheet);
+    }
+    const loaded = sheets.map((sheet) => sheet.ready);
     const waited = new Promise((resolve) => { setTimeout(resolve, STYLE_WAIT_MS); });
-    this.sheets.append(...links);
+    this.sheets.append(...sheets.map((sheet) => sheet.el));
     this.ready = Promise.race([Promise.all(loaded), waited]).then(() => {
       if (this.sheetsKey !== key) return;
       for (const sheet of old) sheet.remove();
@@ -148,13 +145,6 @@ export class DashboardView {
       this.restyle();
     });
     return this.ready;
-  }
-
-  makeSheet(url) {
-    const sheet = document.createElement("link");
-    sheet.rel = "stylesheet";
-    sheet.href = url;
-    return sheet;
   }
 
   themeChanged() {

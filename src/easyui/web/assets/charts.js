@@ -17,6 +17,10 @@ import { axisFormatter, axisStep, display, looksLikeDates, numeric, shortDate, s
 import { onThemeChange, resolveColor } from "./theme.js";
 
 let loading = null;
+// The hash of vendor/echarts.min.js (also in vendor/MANIFEST.json; tests/test_web_static.py checks both),
+// so the browser refuses a changed file. A page opened straight from the disk (file://) cannot check it
+// (each file is its own origin there), so it is set only for pages served over http(s).
+export const ECHARTS_INTEGRITY = "sha384-C2iskrW/uPW46KzOjrvJIQo4YkV8lkD+QS0CrDN18IIPIpT/g2USu8bTP3nvmIAD";
 
 /** Load ECharts once, on first use (it is large and the sign-in page does not need it). */
 export function loadECharts() {
@@ -25,6 +29,7 @@ export function loadECharts() {
     loading = new Promise((resolve, reject) => {
       const script = document.createElement("script");
       script.src = new URL("vendor/echarts.min.js", import.meta.url).href;
+      if (window.location.protocol !== "file:") script.integrity = ECHARTS_INTEGRITY;
       script.async = true;
       script.addEventListener("load", () => (window.echarts ? resolve(window.echarts) : reject(new Error("no echarts"))));
       script.addEventListener("error", () => {

@@ -554,23 +554,31 @@ def test_passkeys_need_https_or_localhost(env):
 
 @pytest.mark.parametrize("base", ["https://dash.example.net", "http://dash.example.net"])
 def test_passkeys_over_https_behind_the_private_network_proxy(env, base):
-    # https: the connection says so. http: a proxy on this computer that does not say the browser used
-    # https; the browser's own Origin (https) is what counts then, never the other way round.
+    # https: the connection says so. http: a proxy on this computer that talks plain http to the server;
+    # the configured origin (https) decides, so the cookies are the https ones (Secure, __Host-) either way.
     c = env.make(base=base, origins=("https://dash.example.net",))
     https = "https://dash.example.net"
     h = {"origin": https}
-    r = c.post("/api/login", json={"password": PW}, headers=h)
+
+    def keep(resp):  # the test client talks plain http to the "proxy" side; the browser would be on https
+        assert all(k.startswith("__Host-") for k in resp.cookies)
+        if base.startswith("http:"):
+            for k, v in resp.cookies.items():
+                c.cookies.set(k, v)
+        return resp
+
+    r = keep(c.post("/api/login", json={"password": PW}, headers=h))
     assert r.status_code == 200
     a = SoftAuthenticator(EDDSA)
-    opts = c.post("/api/passkeys/options", json={"purpose": "register"}, headers=h)
+    opts = keep(c.post("/api/passkeys/options", json={"purpose": "register"}, headers=h))
     assert opts.status_code == 200 and opts.json()["publicKey"]["rp"]["id"] == "dash.example.net"
-    r = c.post("/api/passkeys/register", json={"credential": a.register(opts.json(), https)}, headers=h)
+    r = keep(c.post("/api/passkeys/register", json={"credential": a.register(opts.json(), https)}, headers=h))
     assert r.status_code == 200, r.text
-    opts = c.post("/api/passkeys/options", json={"purpose": "login"}, headers=h)
-    r = c.post("/api/passkeys/login", json={"credential": a.login(opts.json(), https)}, headers=h)
+    opts = keep(c.post("/api/passkeys/options", json={"purpose": "login"}, headers=h))
+    r = keep(c.post("/api/passkeys/login", json={"credential": a.login(opts.json(), https)}, headers=h))
     assert r.status_code == 200, r.text
     # An answer made for plain http on that name is refused (the page can never be plain http there).
-    opts = c.post("/api/passkeys/options", json={"purpose": "login"}, headers=h)
+    opts = keep(c.post("/api/passkeys/options", json={"purpose": "login"}, headers=h))
     r = c.post("/api/passkeys/login", json={"credential": a.login(opts.json(), "http://dash.example.net")}, headers=h)
     assert r.status_code == 400
     # The same passkey does not work on another address of the same server.
