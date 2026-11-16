@@ -23,7 +23,8 @@ Public API
 ``current_bundle(where) -> Path | None``
     The file the ``current`` link points to, or None. ``where`` is an
     ``AppConfig`` or ``paths.StatePaths``. Only bundle file names inside the
-    data folder are ever followed.
+    data folder are ever followed, and neither ``data/`` nor the bundle may be
+    a link (the project's account writes this folder; the server only reads it).
 ``require_current(where) -> Path``
     Like ``current_bundle`` but raises ``NoData`` (plain message + hint).
 ``list_bundles(where) -> list[dict]``
@@ -54,6 +55,7 @@ import os
 import re
 import secrets
 import sqlite3
+import stat
 import time
 from pathlib import Path
 from typing import Any
@@ -104,14 +106,17 @@ def _connect_ro(db: Path, *, immutable: bool) -> sqlite3.Connection:
 
 def current_bundle(where: AppConfig | paths.StatePaths) -> Path | None:
     st = _state(where)
-    try:
-        target = os.readlink(st.current)
+    try:  # data/ and the bundle are reached without following links (another account writes this folder)
+        target = paths.readlink_nofollow(st.current, 2)
     except OSError:
         return None
     if not BUNDLE_RE.match(target):
         return None
     p = st.data / target
-    return p if p.is_file() else None
+    try:
+        return p if stat.S_ISREG(paths.lstat_nofollow(p, 2).st_mode) else None
+    except OSError:
+        return None
 
 
 def require_current(where: AppConfig | paths.StatePaths) -> Path:
@@ -152,7 +157,7 @@ def rev(where: AppConfig | paths.StatePaths) -> str:
 def bundle_info(path: str | Path) -> dict[str, Any]:
     side = Path(path).with_suffix(".json")
     try:
-        return json.loads(side.read_text(encoding="utf-8"))
+        return json.loads(paths.read_nofollow(side, 2, 1_000_000).decode("utf-8"))
     except (OSError, ValueError):
         return {}
 

@@ -9,8 +9,10 @@ Files (all in ``<ui>/auth/``, mode 0600, written atomically under the auth lock)
 
 - ``passkeys.json``: ``{"v": 1, "user_id", "credentials": {id: {...}}, "password_sign_in"}``.
   Each credential: ``public_key`` (the COSE key, base64url), ``alg``, ``sign_count``,
-  ``rp_id`` (the host name it was made for), ``name``, ``created``, ``last_used``,
-  ``backup_eligible``, ``backed_up``, ``aaguid``, ``transports``. Public keys are not
+  ``rp_id`` (the RP ID it was made for, kept for good: it is checked at every sign-in and
+  must be one the server is configured for), ``name``, ``created``, ``last_used``,
+  ``backup_eligible`` (checked at every sign-in: it never changes for a passkey), ``backed_up``,
+  ``aaguid``, ``transports``. Public keys are not
   secret; nothing in this file lets anyone sign in.
 - ``recovery.json``: ``{"v": 1, "salt", "created", "codes": [{"hash", "used"}]}``. Only
   salted SHA-256 hashes are stored; the codes are shown once, when they are made.
@@ -31,7 +33,7 @@ Rules
   password.
 - Challenges are 40 bytes: 16 random bytes, an 8-byte expiry time and a 16-byte
   HMAC-SHA256 tag over the purpose (``register`` / ``login``), what the challenge is
-  bound to (the session for ``register``, a random browser cookie for ``login``),
+  bound to (the session for ``register`` and ``confirm``, a random browser cookie for ``login``),
   the random part and the expiry, with a key made fresh in each server process.
   So the server keeps no list of open challenges (nobody can fill it up to
   push out the owner's), a challenge expires after ``CHALLENGE_SECONDS`` (5
@@ -48,12 +50,13 @@ Public API
 ``PasskeyStore(auth_dir, clock=time.time)``
     ``user_id()``, ``credentials() -> dict``, ``listing() -> list[dict]`` (no keys), ``count()``,
     ``get(credential_id_b64) -> dict | None``, ``add(registration, *, rp_id, name) -> dict``,
-    ``touch(credential_id_b64, sign_count, backed_up)``, ``remove(id_or_name) -> dict`` (the removed one),
+    ``touch(credential_id_b64, sign_count, backed_up)`` (raises when the passkey is gone or its counter did not
+    go up), ``remove(id_or_name) -> dict`` (the removed one),
     ``password_sign_in() -> bool``, ``set_password_sign_in(on, *, password_set) -> bool``.
 ``RecoveryCodes(auth_dir, clock=time.time)``
     ``make() -> list[str]`` (shown once), ``use(code) -> bool``, ``left() -> int``, ``status() -> dict``.
 ``normalize_code(text) -> str | None``
-``Challenges(clock=time.time)``
+``Challenges(clock=time.time)``      purposes: ``login``, ``register``, ``confirm``.
     ``issue(purpose, binding) -> bytes``, ``check(challenge, purpose, binding)`` (raises),
     ``accept(challenge)`` (raises when it was already used; call after the answer verified).
 ``default_name(listing, now) -> str``
@@ -223,8 +226,12 @@ class PasskeyStore:
         with locked(self.lock_path):
             data = self._read()
             c = data["credentials"].get(credential_id)
-            if c is None:
-                return
+            if c is None:  # removed while its answer was being checked: it no longer signs in
+                raise WebAuthnError(
+                    "This passkey was removed a moment ago, so you are not signed in with it.",
+                    hint="Sign in another way, or with another passkey.",
+                    code="unknown_passkey",
+                )
             # Checked again under the lock: two answers verified at the same time against the same stored
             # counter (a copied authenticator) must not both get in, and the counter never moves back.
             stored = int(c.get("sign_count") or 0)

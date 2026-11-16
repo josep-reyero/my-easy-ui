@@ -100,9 +100,9 @@ export const api = {
   passkeyOptions: (purpose) => call("POST", "passkeys/options", { purpose }),
   passkeyLogin: (credential) => call("POST", "passkeys/login", { credential }),
   passkeyRegister: (credential, name) => call("POST", "passkeys/register", { credential, name }),
-  passkeyRemove: (id) => call("POST", "passkeys/remove", { id }),
+  passkeyRemove: (id, confirm) => call("POST", "passkeys/remove", confirm ? { id, confirm } : { id }),
   signInSettings: () => call("GET", "signin"),
-  passwordSignIn: (on) => call("POST", "signin/password", { on }),
-  recoveryCodes: () => call("POST", "recovery-codes", {}),
+  passwordSignIn: (on, confirm) => call("POST", "signin/password", confirm ? { on, confirm } : { on }),
+  recoveryCodes: (confirm) => call("POST", "recovery-codes", confirm ? { confirm } : {}),
   recoveryLogin: (code) => call("POST", "recovery", { code }),
 };

@@ -1,11 +1,14 @@
 // The sign-in settings page (#/sign-in): the passkeys that can sign in (add,
 // remove), whether the password can still be used, and the recovery codes.
 // Changes are allowed only shortly after signing in; the server enforces that
-// and this page says so.
+// and this page says so. When this page signed in with the password or a
+// recovery code and a passkey exists, removing a passkey, switching the
+// password and making new recovery codes are confirmed with a passkey first
+// (the server asks for it: confirm_needed).
 
 import { h, fill, icon, nextId } from "./dom.js";
 import { api, describe } from "./api.js";
-import { passkeysSupported, createPasskey, passkeyProblem } from "./passkey.js";
+import { passkeysSupported, createPasskey, getPasskey, passkeyProblem } from "./passkey.js";
 import { MONTHS } from "./format.js";
 
 function day(seconds) {
@@ -76,6 +79,13 @@ export class SignInSettings {
 
   // ---- actions ----------------------------------------------------------
 
+  /** A fresh passkey answer when the server needs one for this change, else undefined. */
+  async confirmation() {
+    if (!this.data || !this.data.confirm_needed) return undefined;
+    const options = await api.passkeyOptions("confirm");
+    return getPasskey(options);
+  }
+
   addPasskey(name) {
     return this.act(async () => {
       const options = await api.passkeyOptions("register");
@@ -88,20 +98,20 @@ export class SignInSettings {
 
   removePasskey(p) {
     this.confirming = null;
-    return this.act(() => api.passkeyRemove(p.id), (out) => (out.removed.password_sign_in_turned_on
+    return this.act(async () => api.passkeyRemove(p.id, await this.confirmation()), (out) => (out.removed.password_sign_in_turned_on
       ? `Removed “${p.name}”. It was the last passkey, so signing in with the password is on again.`
       : `Removed “${p.name}”. It can no longer sign in.`));
   }
 
   switchPassword(on) {
-    return this.act(() => api.passwordSignIn(on), on
+    return this.act(async () => api.passwordSignIn(on, await this.confirmation()), on
       ? "Signing in with the password is on again."
       : "Signing in with the password is off. Passkeys and recovery codes still sign in.");
   }
 
   makeCodes() {
     return this.act(async () => {
-      const out = await api.recoveryCodes();
+      const out = await api.recoveryCodes(await this.confirmation());
       this.codes = out.codes;
       return out;
     }, null);
@@ -135,6 +145,9 @@ export class SignInSettings {
         h("p", { class: "note-hint", text: "For your safety, these settings can only be changed in the 10 minutes after signing in." }),
         h("button", { class: "btn-secondary", type: "button", text: "Sign in again", on: { click: () => this.onSignInAgain() } }),
       ]));
+    }
+    if (d.confirm_needed && !locked && !this.flash) {
+      parts.push(h("p", { class: "settings-p is-quiet", text: "This page signed in with the password or a recovery code, so changes here are confirmed with one of your passkeys first." }));
     }
     if (this.codes) parts.push(this.codesPanel());
     if (this.offer && !d.passkeys.length && d.passkeys_here && passkeysSupported()) parts.push(this.offerPanel());

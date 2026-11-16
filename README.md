@@ -83,9 +83,12 @@ files back so you can edit from there.
 
 **Passkeys.** After the first sign-in with the password, the page offers to add a passkey
 (**Sign-in** in the header: add, name and remove passkeys, switch password sign-in off, make
-recovery codes). Passkeys work on `http://localhost` and over HTTPS (for example behind the
+recovery codes). Passkeys work on `http://localhost:PORT` and over HTTPS (for example behind the
 private network's proxy); on other plain-http addresses the page uses the password. Signing in
-with a passkey is never slowed down by someone guessing passwords. From the server's terminal:
+with a passkey is never slowed down by someone guessing passwords. Removing a passkey, switching
+password sign-in on or off and making new recovery codes sign out every other browser; when the
+page signed in with the password or a recovery code and a passkey exists, these changes are also
+confirmed with a passkey first. From the server's terminal:
 `easy-ui passkeys` (list), `easy-ui passkeys remove NAME`, `easy-ui sign-in` (status),
 `easy-ui sign-in password on|off`, `easy-ui recovery-codes` (ten one-time codes, shown once on
 the terminal only).
@@ -114,18 +117,36 @@ installed on this computer (`EASYUI_CHROMIUM` picks one) and saves the whole pag
 no password, no network.
 
 **Running it for real.** Started by hand, `easy-ui serve` runs until it is stopped. On a
-server, `easy-ui units --render-only` writes the systemd socket and service for the project's
-web account `mes-<project>-web`: started on the first visit (socket activation), stopped after
-10 minutes without use, and able to read only the project's `ui/` folder and write only
-`ui/auth/`. It prints the folders, owners and modes to create (see [Where things
-live](#where-things-live)). Pass `--allow-host NAME` (to `serve` or `units`) with the name the
-private network's proxy uses, so the server accepts requests under that name. Commands for the
-sign-in on a server run as the web account, for example
-`sudo -u mes-fitness-web easy-ui set-password --ui-dir /var/lib/mes/fitness/ui`.
+server, `easy-ui units --render-only --origin https://NAME` writes the systemd socket and service
+for the project's web account `mes-<project>-web`: started on the first visit (socket
+activation), stopped after 10 minutes without use, and able to read only the project's `ui/`
+folder and write only its sign-in folder `/var/lib/mes/<project>/auth/`. It prints the folders,
+owners and modes to create (see [Where things live](#where-things-live)); with `--json` it also
+gives every value the units use (`exec`, `ui_dir`, `auth_dir`, `socket`, `accounts`, `origins`,
+`memory_max`, `exec_start`), for tools that render the units themselves. Commands for the sign-in
+on a server run as the web account, for example
+`sudo -u mes-fitness-web easy-ui set-password --ui-dir /var/lib/mes/fitness/ui --auth-dir /var/lib/mes/fitness/auth`.
+
+**Web addresses.** The server answers only to the web addresses it is configured with, never to
+whatever a request claims, so a page on another port or name cannot borrow a passkey or a
+sign-in. Give the exact address the dashboards are opened with (scheme, name and port):
+
+```sh
+easy-ui serve --socket /run/mes/fitness-web.sock --origin https://myserver.example.ts.net
+easy-ui serve --port 8765 --origin https://myserver.example.ts.net:8443   # behind a proxy on port 8443
+```
+
+`--origin` can be repeated; `EASYUI_ORIGINS` (comma-separated) does the same. `--allow-host NAME`
+(and `EASYUI_ALLOW_HOSTS`) still works as shorthand for `--origin https://NAME`. When an origin
+is given, only those addresses work, and `localhost` does not. Without one, `easy-ui serve --port
+PORT` answers only to `http://localhost:PORT` (and `http://127.0.0.1:PORT`, without passkeys) on
+exactly that port, and `serve --socket` refuses to start. Passkeys are made for the address's
+name (its RP ID) and keep it: a passkey made on `http://localhost:8765` works on
+`http://localhost` at any port, one made on `https://myserver.example.ts.net` only there.
 
 Every command accepts `--json` (only JSON on stdout, errors as JSON), `--project-dir PATH` (the
-folder holding `project.toml`; `--app-dir` still works) and `--ui-dir PATH` (the ui folder alone,
-as the web account uses it), before or after the command. Commands that run until stopped (`serve`, `preview`) still print their
+folder holding `project.toml`; `--app-dir` still works), `--ui-dir PATH` (the ui folder alone,
+as the web account uses it) and `--auth-dir PATH` (the sign-in folder), before or after the command. Commands that run until stopped (`serve`, `preview`) still print their
 result when stopped with Ctrl-C or SIGTERM. Exit codes: 0 ok, 1 error, 2 usage, 3 not found, 4
 not allowed, 5 refused for safety, 6 needs you, 75 try again later.
 
@@ -154,9 +175,13 @@ On your own computer:
   easy-ui only reads it.
 - easy-ui's own folder (the *ui folder*): `~/.local/state/mes/<project>/ui/` (`MES_STATE_HOME`
   changes the base; `EASYUI_STATE_HOME`, mostly for tests, makes it `$EASYUI_STATE_HOME/<project>/`), with `data/` (the dashboard data copies and the
-  `current` link), `specs/` (published dashboard versions), `auth/` (password hash, passkeys,
-  recovery codes, sessions) and `project.json` (the name, title, accent and menu order, so the
-  server never needs `project.toml`). To start over, delete that folder.
+  `current` link), `specs/` (published dashboard versions) and `project.json` (the name, title,
+  accent and menu order, so the server never needs `project.toml`). To start over, delete that folder.
+- The sign-in folder (password hash, passkeys, recovery codes, sessions), beside the ui folder:
+  `~/.local/state/mes/<project>/auth/` (with `EASYUI_STATE_HOME`, for tests, inside the ui folder:
+  `$EASYUI_STATE_HOME/<project>/auth/`; `--auth-dir PATH` names another one). The commands that use it refuse a sign-in folder that is
+  a link, belongs to another account, is not mode 0700 or sits in a folder another account can
+  change.
 - Sample data for the preview: `ui/fixtures/*.sqlite`, `*.sqlite3` or `*.db` in the project
   (made-up data only), used when the project has no data yet or with `easy-ui preview --fixture`.
 
@@ -164,12 +189,17 @@ On a server (`MES_ROOT=/var/lib/mes`, set by my-easy-software for its jobs):
 
 | Folder | Owner : group | Mode | Why |
 | --- | --- | --- | --- |
-| `/var/lib/mes/<p>` | `mes-<p>` : `mes-<p>-web` | 0710 | the web account may pass through, not list |
+| `/var/lib/mes/<p>` | `root` : `root` | 0711 | only root may add, rename or replace what is in it |
 | `/var/lib/mes/<p>/data` | (my-easy-software) | | the project's own data; the web account cannot enter |
 | `/var/lib/mes/<p>/ui`, `ui/data`, `ui/specs` | `mes-<p>` : `mes-<p>-web` | 2750 | written by the jobs (`data build`, `publish`), read by the web account |
-| `/var/lib/mes/<p>/ui/auth` | `mes-<p>-web` : `mes-<p>-web` | 0700 | the sign-in, written only by the web account |
+| `/var/lib/mes/<p>/auth` | `mes-<p>-web` : `mes-<p>-web` | 0700 | the sign-in, written only by the web account; beside `ui/`, never inside it |
 
 `data build` and `publish` keep what they write readable by that group whatever the umask. The
+web account reads everything under `ui/` without following links, because the project's account
+writes that folder. An older layout kept the sign-in in `ui/auth/`; that folder is not moved or
+read (the project's account could have changed it, so it cannot be trusted): after upgrading,
+set the password and add the passkeys again (on a personal machine too: the sign-in folder moved
+from `ui/auth/` to beside `ui/`). The
 service sees nothing else under `/var/lib/mes` (it is hidden from it), and `easy-ui` itself must
 be installed outside `/var/lib/mes` and outside home folders (for example `/usr/local/bin`).
 
@@ -182,7 +212,7 @@ limits: formatting is English-style only (`1,234.5`, `14 Mar 2026`); charts spac
 (one per row), which suits daily and weekly series; a browser that has never signed in can be
 kept from signing in *with the password* by someone on the private network who keeps sending
 wrong passwords (passkeys and recovery codes are not affected); passkeys need `localhost` or
-HTTPS; a shared copy shows one set of control values. Tested with Chromium; not yet with Safari
+HTTPS and work only on the configured web addresses; a shared copy shows one set of control values. Tested with Chromium; not yet with Safari
 or Firefox; the systemd files are checked by tests, not yet on a real server.
 
 ## Development

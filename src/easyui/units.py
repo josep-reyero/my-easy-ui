@@ -13,8 +13,9 @@
   capabilities, the ``@system-service`` system-call set, at most 256 MB of
   memory, ``UMask=0077``. ``<root>`` (``/var/lib/mes``) is replaced by an empty
   read-only folder, and only this project's ``ui/`` is put back, read-only,
-  with ``ui/auth/`` (password hash, passkeys, recovery codes, sessions) the one
-  writable place. So the web account sees nothing else of the project: not its
+  with ``<root>/<project>/auth/`` (password hash, passkeys, recovery codes,
+  sessions; beside ``ui/``, never inside it, because the project's account
+  writes ``ui/``) the one writable place. So the web account sees nothing else of the project: not its
   code, data, state, saved logins or store, and nothing of other projects. It
   never reads ``project.toml`` (``ui/project.json``, written by ``data build``
   and ``publish``, tells it the project's name and title). ``ExecStart`` runs
@@ -24,20 +25,26 @@ The folders the units expect, which the administrator's script creates (``mes
 server plan`` does this), are listed in the result as ``folders`` (path,
 owner, group, mode, why) and in the units' header comment:
 
-- ``<root>/<project>``           ``mes-<project>:mes-<project>-web``  0710
+- ``<root>/<project>``           ``root:root``  0711 (only root may change what is in it)
 - ``<root>/<project>/ui``        ``mes-<project>:mes-<project>-web``  2750 (setgid: new files get the web group)
 - ``<root>/<project>/ui/data``   ``mes-<project>:mes-<project>-web``  2750
 - ``<root>/<project>/ui/specs``  ``mes-<project>:mes-<project>-web``  2750
-- ``<root>/<project>/ui/auth``   ``mes-<project>-web:mes-<project>-web``  0700
+- ``<root>/<project>/auth``      ``mes-<project>-web:mes-<project>-web``  0700
+
+An old ``<root>/<project>/ui/auth`` is not moved or read: the project's account
+could have changed it, so its contents cannot be trusted. Set the password and
+add the passkeys again after moving to this layout.
 
 ``mes-<project>`` runs ``easy-ui data build`` and ``easy-ui publish`` (with
 ``MES_ROOT=<root>``); the person runs ``easy-ui set-password``, ``passkeys``,
 ``sign-in`` and ``recovery-codes`` as the web account, for example
-``sudo -u mes-<project>-web easy-ui set-password --ui-dir <root>/<project>/ui``.
+``sudo -u mes-<project>-web easy-ui set-password --ui-dir <root>/<project>/ui
+--auth-dir <root>/<project>/auth`` (with ``MES_ROOT=<root>`` the sign-in folder
+is found without ``--auth-dir``).
 
 Every value put into a unit is validated against a strict pattern (the
 project name, the account names, absolute normalised paths of
-``[A-Za-z0-9._/+-]``, ``<n>[KMG]`` memory, host names) and then escaped for
+``[A-Za-z0-9._/+-]``, ``<n>[KMG]`` memory, web addresses) and then escaped for
 systemd (``%`` specifiers, ``$`` expansion, backslashes); free text such as
 the title loses control characters. A project name whose account names would
 be longer than 32 characters (the limit for account names) is refused, as are
@@ -58,10 +65,18 @@ Public API
 ``accounts(project) -> (project_account, web_account)``  ``mes-<project>``, ``mes-<project>-web``.
 ``unit_names(project) -> (socket_name, service_name)``
 ``folders(project, *, root=DEFAULT_ROOT) -> list[dict]``
-``render_units(project, *, title=None, exec_path=DEFAULT_EXEC, root=DEFAULT_ROOT, socket_path=None,
+``unit_params(project, *, origins=(), allow_hosts=(), exec_path=..., root=..., socket_path=None, socket_owner="root",
+memory_max=...) -> dict``  every value the units use, validated: ``project``, ``accounts`` ({project, web}),
+    ``unit_names`` ({socket, service}), ``exec``, ``root``, ``ui_dir``, ``auth_dir``, ``socket``, ``socket_owner``,
+    ``origins``, ``memory_max``, ``exec_start`` (the service's command as a list of arguments).
+``check_origins(origins=(), allow_hosts=()) -> list[str]``  the web addresses, validated; at least one.
+``render_units(project, *, origins=(), title=None, exec_path=DEFAULT_EXEC, root=DEFAULT_ROOT, socket_path=None,
 socket_owner="root", memory_max=DEFAULT_MEMORY_MAX, allow_hosts=()) -> dict[str, str]``
-    ``{file name: unit text}``. ``allow_hosts`` become ``EASYUI_ALLOW_HOSTS`` (the names the private
-    network's proxy uses, which the server must accept).
+    ``{file name: unit text}``. ``origins`` (``https://NAME[:PORT]``) and ``allow_hosts`` (``NAME``,
+    shorthand for ``https://NAME``) are the exact web addresses the dashboards are opened with (the
+    private network's proxy); at least one is needed, and each becomes an ``--origin`` argument of
+    ``easy-ui serve`` in ``ExecStart=``. The server then accepts requests and passkeys for exactly
+    those addresses and nothing else.
 ``write_units(units, out_dir) -> list[str]``  writes without following links.
 ``register(subparsers)``                  the ``units`` command.
 """
@@ -74,7 +89,7 @@ import re
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from easyui import paths
+from easyui import paths, security
 from easyui.errors import NeedsHuman, UsageError
 
 DEFAULT_EXEC = "/usr/local/bin/easy-ui"
@@ -93,6 +108,7 @@ REFUSED_ACCOUNTS = frozenset({
 })
 # Folders anyone can write to: a program there could be replaced by another account.
 _WORLD_WRITABLE = ("/tmp", "/var/tmp", "/dev/shm", "/run/shm")
+EXEC_ARG_RE = re.compile(r"^[A-Za-z0-9._/+:\[\]-]+\Z")
 HOST_RE = re.compile(r"^(?=.{1,253}\Z)[a-z0-9](?:[a-z0-9-]{0,62})(?:\.[a-z0-9](?:[a-z0-9-]{0,62}))*\Z")
 
 
@@ -135,16 +151,30 @@ def check_service_user(value: Any) -> str:
     return value
 
 
-def check_hosts(values: Any) -> list[str]:
+def check_origins(origins: Any = (), allow_hosts: Any = ()) -> list[str]:
+    """The exact web addresses for the service, validated and normalised; at least one is needed."""
     out = []
-    for v in values or []:
-        h = str(v).strip().lower().rstrip(".")
-        if not HOST_RE.match(h):
+    for v, parse in [(o, security.parse_origin) for o in origins or []] + [(h, security.origin_for_host) for h in allow_hosts or []]:
+        try:
+            o = parse(str(v).strip())
+        except ValueError as e:
             raise UsageError(
-                f"{str(v)[:80]!r} is not a host name easy-ui will put into a service file.",
-                hint="Give the name the dashboards are opened under, for example myserver.example.ts.net.",
-            )
-        out.append(h)
+                f"{e} So it was not put into a service file.",
+                hint="Give the address the dashboards are opened with, for example --origin "
+                "https://myserver.example.ts.net (or --allow-host myserver.example.ts.net).",
+                code="bad_origin",
+            ) from None
+        if not (HOST_RE.match(o.host) or o.is_ip):
+            raise UsageError(f"{str(v)[:80]!r} is not a web address easy-ui will put into a service file.",
+                             hint="Use letters, digits, dots and dashes in the name.", code="bad_origin")
+        out.append(str(o))
+    if not out:
+        raise UsageError(
+            "The service needs the web address the dashboards will be opened with, so no service files were made. "
+            "Without it the server would refuse every request.",
+            hint="Add it, for example: easy-ui units --render-only --origin https://myserver.example.ts.net",
+            code="origin_needed",
+        )
     return list(dict.fromkeys(out))
 
 
@@ -199,25 +229,31 @@ def folders(project: str, *, root: str = DEFAULT_ROOT) -> list[dict[str, str]]:
     base = f"{root}/{project}"
     shared = "the project's account writes it; the web account only reads it (through its group)"
     return [
-        {"path": base, "owner": owner, "group": web, "mode": "0710", "why": "the web account may pass through to ui/, nothing else"},
+        {"path": base, "owner": "root", "group": "root", "mode": "0711",
+         "why": "only root may add, rename or replace what is in it (so the project's account cannot touch auth/); "
+         "other accounts may pass through, and the folders inside decide who may enter"},
         {"path": f"{base}/ui", "owner": owner, "group": web, "mode": "2750", "why": "published dashboards and data: " + shared},
         {"path": f"{base}/ui/data", "owner": owner, "group": web, "mode": "2750", "why": "dashboard data copies: " + shared},
         {"path": f"{base}/ui/specs", "owner": owner, "group": web, "mode": "2750", "why": "published dashboard versions: " + shared},
-        {"path": f"{base}/ui/auth", "owner": web, "group": web, "mode": "0700", "why": "sign-in (password hash, passkeys, sessions): the web account only"},
+        {"path": f"{base}/auth", "owner": web, "group": web, "mode": "0700",
+         "why": "sign-in (password hash, passkeys, recovery codes, sessions): the web account only, beside ui/ and "
+         "never inside it"},
     ]
 
 
-def render_units(
+def unit_params(
     project: str,
     *,
-    title: str | None = None,
+    origins: list[str] | tuple[str, ...] = (),
+    allow_hosts: list[str] | tuple[str, ...] = (),
     exec_path: str = DEFAULT_EXEC,
     root: str = DEFAULT_ROOT,
     socket_path: str | None = None,
     socket_owner: str = "root",
     memory_max: str = DEFAULT_MEMORY_MAX,
-    allow_hosts: list[str] | tuple[str, ...] = (),
-) -> dict[str, str]:
+) -> dict[str, Any]:
+    """Every value the two units need, validated (raises ``UsageError``). ``easy-ui units --json`` shows them, so
+    a tool that renders the units from its own template gets exactly these values."""
     owner_account, web = accounts(project)
     socket_name, service_name = unit_names(project)
     sock_owner = check_user(socket_owner)
@@ -229,7 +265,7 @@ def render_units(
             "proxy's own account.",
             code="account_refused",
         )
-    hosts = check_hosts(allow_hosts)
+    site = check_origins(origins, allow_hosts)
     exec_path = check_path(exec_path, what="The program path (--exec)")
     root = check_path(root, what="The folder for all projects (--root)")
     if _under(exec_path, _WORLD_WRITABLE):
@@ -259,9 +295,49 @@ def render_units(
         raise UsageError("The socket must not be inside the projects' folder.", hint=f"Use for example {DEFAULT_SOCKET_DIR}/{project}-web.sock.")
     if not isinstance(memory_max, str) or not MEMORY_RE.match(memory_max):
         raise UsageError(f"{str(memory_max)[:20]!r} is not a memory size.", hint="Use a number and K, M or G, e.g. 256M.")
+    ui, auth = f"{root}/{project}/ui", f"{root}/{project}/auth"
+    argv = [exec_path, "serve", "--ui-dir", ui, "--auth-dir", auth]
+    for o in site:
+        argv += ["--origin", o]
+    for a in argv:  # nothing systemd would expand or unquote: every value was checked against a strict pattern
+        if not EXEC_ARG_RE.match(a):  # pragma: no cover - the checks above make this impossible
+            raise UsageError(f"{a[:80]!r} cannot go into a service file.", hint="Use plain paths and addresses.")
+    return {
+        "project": project,
+        "accounts": {"project": owner_account, "web": web},
+        "unit_names": {"socket": socket_name, "service": service_name},
+        "exec": exec_path,
+        "root": root,
+        "ui_dir": ui,
+        "auth_dir": auth,
+        "socket": socket_path,
+        "socket_owner": sock_owner,
+        "origins": site,
+        "memory_max": memory_max,
+        "exec_start": argv,
+    }
 
+
+def render_units(
+    project: str,
+    *,
+    origins: list[str] | tuple[str, ...] = (),
+    title: str | None = None,
+    exec_path: str = DEFAULT_EXEC,
+    root: str = DEFAULT_ROOT,
+    socket_path: str | None = None,
+    socket_owner: str = "root",
+    memory_max: str = DEFAULT_MEMORY_MAX,
+    allow_hosts: list[str] | tuple[str, ...] = (),
+) -> dict[str, str]:
+    prm = unit_params(project, origins=origins, allow_hosts=allow_hosts, exec_path=exec_path, root=root,
+                      socket_path=socket_path, socket_owner=socket_owner, memory_max=memory_max)
+    owner_account, web = prm["accounts"]["project"], prm["accounts"]["web"]
+    socket_name, service_name = prm["unit_names"]["socket"], prm["unit_names"]["service"]
+    sock_owner, socket_path, memory_max, root = prm["socket_owner"], prm["socket"], prm["memory_max"], prm["root"]
+    auth = prm["auth_dir"]
     e = escape_value
-    ui = f"{root}/{project}/ui"
+    ui = prm["ui_dir"]
     desc = clean_text(f"easy-ui dashboards for {title or project} ({project})", limit=120)
     layout = "\n".join(
         f"#   {f['path']:<40} {f['owner']}:{f['group']} {f['mode']}" for f in folders(project, root=root)
@@ -270,6 +346,7 @@ def render_units(
         f"# Rendered by easy-ui units for the project {project}. Install as an administrator (a system unit).\n"
         f"# The accounts {owner_account} and {web} must exist, without a password, sudo or a login shell, and\n"
         f"# these folders with these owners and modes:\n{layout}\n"
+        f"# An old {ui}/auth is not used (its contents cannot be trusted): set the password and add passkeys again.\n"
     )
     socket = header + "\n".join([
         "",
@@ -298,12 +375,11 @@ def render_units(
         "",
         "[Service]",
         "Type=simple",
-        f"ExecStart={e(exec_path)} serve --ui-dir {e(ui)}",
+        "ExecStart=" + " ".join(prm["exec_start"]),
         f"User={e(web)}",
         f"Group={e(web)}",
         "WorkingDirectory=/",
-        'Environment="HOME=/nonexistent" "MES_CONFIG=/nonexistent"',
-        *([f'Environment="EASYUI_ALLOW_HOSTS={e(",".join(hosts))}"'] if hosts else []),
+        "Environment=HOME=/nonexistent MES_CONFIG=/nonexistent",
         "UMask=0077",
         "Restart=on-failure",
         "RestartSec=2",
@@ -331,11 +407,11 @@ def render_units(
         "KeyringMode=private",
         "RemoveIPC=yes",
         "",
-        "# Only this project's ui/ folder, read-only, with ui/auth/ the one writable place. The project's code,",
-        "# data, state, saved logins and store, and every other project, are not there at all.",
+        "# Only this project's ui/ folder, read-only, and its sign-in folder auth/ (beside ui/), the one writable",
+        "# place. The project's code, data, state, saved logins and store, and every other project, are not there.",
         f"TemporaryFileSystem={e(root)}:ro",
         f"BindReadOnlyPaths={e(ui)}",
-        f"BindPaths={e(ui)}/auth",
+        f"BindPaths={e(auth)}",
         "",
         "# No network of its own: requests arrive only through the socket.",
         "PrivateNetwork=yes",
@@ -394,30 +470,21 @@ def _cmd_units(args: argparse.Namespace) -> Any:
             "them (mes server plan includes them in its script).",
         )
     cfg = load_config(args)
-    root = args.root
-    units = render_units(
-        cfg.name,
-        title=cfg.title,
-        exec_path=args.exec_path,
-        root=root,
-        socket_path=args.socket,
-        socket_owner=args.socket_owner,
-        memory_max=args.memory_max,
-        allow_hosts=args.allow_host or [],
-    )
-    owner, web = accounts(cfg.name)
-    socket_name, _service_name = unit_names(cfg.name)
+    kw: dict[str, Any] = {
+        "exec_path": args.exec_path, "root": args.root, "socket_path": args.socket, "socket_owner": args.socket_owner,
+        "memory_max": args.memory_max, "origins": args.origin or [], "allow_hosts": args.allow_host or [],
+    }
+    units = render_units(cfg.name, title=cfg.title, **kw)
+    prm = unit_params(cfg.name, **kw)
     data = {
         "app": cfg.name,
-        "project": cfg.name,
-        "accounts": {"project": owner, "web": web},
-        "socket": args.socket or f"{DEFAULT_SOCKET_DIR}/{cfg.name}-web.sock",
-        "ui_dir": f"{root}/{cfg.name}/ui",
-        "folders": folders(cfg.name, root=root),
-        "enable": [socket_name],
+        **prm,
+        "folders": folders(cfg.name, root=prm["root"]),
+        "enable": [prm["unit_names"]["socket"]],
         "written": [],
         "units": units,
     }
+    socket_name = prm["unit_names"]["socket"]
     if args.out:
         data["written"] = write_units(units, args.out)
         text = "Wrote " + " and ".join(data["written"]) + ". An administrator installs them (copy to /etc/systemd/system, " \
@@ -442,10 +509,16 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--socket-owner", default="root", help="the account that may connect to the socket (default root)")
     p.add_argument("--memory-max", default=DEFAULT_MEMORY_MAX, help=f"memory limit (default {DEFAULT_MEMORY_MAX})")
     p.add_argument(
+        "--origin",
+        action="append",
+        metavar="URL",
+        help="the exact web address the dashboards are opened with, e.g. https://myserver.example.ts.net "
+        "(repeatable; at least one --origin or --allow-host is needed). The server accepts only these addresses",
+    )
+    p.add_argument(
         "--allow-host",
         action="append",
         metavar="NAME",
-        help="a host name the dashboards are opened under, e.g. the private network name (repeatable); without it "
-        "the server refuses requests that arrive under that name",
+        help="shorthand for --origin https://NAME (repeatable)",
     )
     p.set_defaults(func=_cmd_units)

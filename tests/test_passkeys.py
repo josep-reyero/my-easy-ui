@@ -12,7 +12,7 @@ import warnings
 
 import pytest
 from argon2 import PasswordHasher, Type
-from conftest import run_cli, run_cli_json
+from conftest import run_cli, run_cli_json, site_settings
 from softauthn import SoftAuthenticator, cbor
 
 from easyui import auth, passkeys, server, webauthn
@@ -410,6 +410,7 @@ class Env:
 
     def make(self, base=ORIGIN, client=("127.0.0.1", 50000), **settings):
         settings.setdefault("web_dir", self.web_dir)
+        site_settings(base, settings)
         asgi = server.create_app(self.cfg, server.ServerSettings(**settings), source=_Source(self.cfg), clock=self.clock)
         c = TestClient(asgi, base_url=base, client=client)
         c.asgi = asgi
@@ -545,7 +546,7 @@ def test_passkeys_need_https_or_localhost(env):
         r = post(c, "/api/passkeys/options", {"purpose": "login"})
         assert r.status_code == 403 and r.json()["error"]["code"] == "passkeys_unavailable"
         assert "localhost" in r.json()["error"]["hint"]
-    c = env.make(base="http://dash.example.net", allowed_hosts=("dash.example.net",))
+    c = env.make(base="http://dash.example.net", origins=("http://dash.example.net",))
     r = post(c, "/api/passkeys/options", {"purpose": "login"})
     assert r.status_code == 403 and "https" in r.json()["error"]["message"]
     assert c.get("/api/session").json()["sign_in"]["passkeys_here"] is False
@@ -555,7 +556,7 @@ def test_passkeys_need_https_or_localhost(env):
 def test_passkeys_over_https_behind_the_private_network_proxy(env, base):
     # https: the connection says so. http: a proxy on this computer that does not say the browser used
     # https; the browser's own Origin (https) is what counts then, never the other way round.
-    c = env.make(base=base, allowed_hosts=("dash.example.net",))
+    c = env.make(base=base, origins=("https://dash.example.net",))
     https = "https://dash.example.net"
     h = {"origin": https}
     r = c.post("/api/login", json={"password": PW}, headers=h)
@@ -674,7 +675,7 @@ def test_recovery_code_guessing_is_throttled_but_passkeys_are_not(with_passkey):
 
 
 def test_preview_has_no_passkeys(env):
-    asgi = server.create_app(env.cfg, server.ServerSettings(web_dir=env.web_dir), source=_Source(env.cfg), preview_token="t" * 32)
+    asgi = server.create_app(env.cfg, server.ServerSettings(web_dir=env.web_dir, local_port=8765), source=_Source(env.cfg), preview_token="t" * 32)
     c = TestClient(asgi, base_url=ORIGIN)
     r = post(c, "/api/passkeys/options", {"purpose": "login"})
     assert r.status_code == 403 and r.json()["error"]["code"] == "preview"

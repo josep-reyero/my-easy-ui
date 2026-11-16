@@ -1,44 +1,64 @@
 """HTTP safety rules for the easy-ui server, applied to every request.
 
+The web addresses the server answers to are *configured*, never taken from the
+request (``Origins``):
+
+- With one or more public origins (``easy-ui serve --origin https://NAME[:PORT]``,
+  ``EASYUI_ORIGINS``, or the shorthand ``--allow-host NAME`` / ``EASYUI_ALLOW_HOSTS``
+  for ``https://NAME``), exactly those origins (scheme, host and port) are accepted,
+  and nothing else: not ``localhost``, not ``127.0.0.1``, not another port.
+- Without any, and only when the server listens on ``127.0.0.1:PORT``, the local
+  origins ``http://localhost:PORT``, ``http://127.0.0.1:PORT`` and ``http://[::1]:PORT``,
+  with exactly the port it listens on. Passkeys only work on the first one (an IP
+  address cannot be a passkey's site).
+
 ``SecurityMiddleware`` is a plain ASGI middleware that sits in front of the
 whole app. In order, for each HTTP request it:
 
-1. Checks the ``Host`` header against an allowlist (the configured host names
-   plus ``localhost``, ``127.0.0.1`` and ``[::1]``, any port). This stops DNS
-   rebinding: a web page on another site cannot point its own name at this
-   computer and read the dashboards.
-2. Works out whether the request arrived over HTTPS: the connection itself is
-   TLS, or ``X-Forwarded-Proto: https`` was sent by a *trusted* peer (the local
-   socket or a loopback address, which is where the private-network proxy
-   connects from). From any other peer the header is ignored.
-3. Allows only ``GET``, ``HEAD`` and ``POST``.
-4. For every state-changing request (``POST``) requires a same-origin request:
-   an ``Origin`` header equal to this server's own origin, or, when there is no
-   ``Origin``, ``Sec-Fetch-Site: same-origin``. A ``Sec-Fetch-Site`` other than
-   ``same-origin`` is always refused. It also requires a JSON content type, so
-   a plain HTML form on another site can never post here. (The session check
-   is done by the routes; the sign-in endpoints are the only ones without it.)
-5. Limits the request body (default 64 KiB); a bigger body gets 413, and a body
+1. Refuses a request that has more than one ``Host``, ``Origin``,
+   ``Sec-Fetch-Site`` or ``Content-Type`` header (each part of easy-ui must read
+   the same value).
+2. Matches the ``Host`` header (name *and* port) against the accepted origins;
+   a request under any other name or port is refused. This stops DNS
+   rebinding, and pages on other ports of the same computer.
+3. Works out whether the request arrived over HTTPS (for the cookie flags):
+   the connection itself is TLS, or ``X-Forwarded-Proto: https`` was sent by a
+   *trusted* peer (the local socket or a loopback address, which is where the
+   private-network proxy connects from). From any other peer the header is ignored.
+4. Allows only ``GET``, ``HEAD`` and ``POST``.
+5. For every state-changing request (``POST``) requires a same-origin request:
+   an ``Origin`` header exactly equal to the matched configured origin, or, when
+   there is no ``Origin``, ``Sec-Fetch-Site: same-origin``. A ``Sec-Fetch-Site``
+   other than ``same-origin`` is always refused. It also requires a JSON content
+   type, so a plain HTML form on another site can never post here. (The session
+   check is done by the routes; the sign-in endpoints are the only ones without it.)
+6. Limits the request body (default 64 KiB); a bigger body gets 413, and a body
    that has not fully arrived within ``BODY_TIMEOUT`` (10 s) gets 408.
-6. Adds the security headers to every response (``security_headers``):
+7. Adds the security headers to every response (``security_headers``):
    a strict Content-Security-Policy, ``X-Content-Type-Options: nosniff``,
    ``Referrer-Policy: no-referrer``, ``Cross-Origin-Opener-Policy`` and
    ``Cross-Origin-Resource-Policy: same-origin``, a ``Permissions-Policy``
    denying every feature except passkeys for this site itself, ``X-Frame-Options: DENY``,
    ``Cache-Control: no-store`` on ``/api/`` responses and HSTS over HTTPS.
-7. Turns any unexpected exception into a plain JSON 500 without a stack trace
+8. Turns any unexpected exception into a plain JSON 500 without a stack trace
    or file path (the details go to the server log only).
 
-The result of steps 1-2 is stored in ``scope["state"]["easyui"]`` as a
-``RequestInfo`` (``https``, ``host``, ``origin``), read back with
+The result of steps 2-3 is stored in ``scope["state"]["easyui"]`` as a
+``RequestInfo`` (``https``, ``host``, ``origin``, ``site``), read back with
 ``request_info(request)``.
 
 Public API
 ----------
 ``CSP``, ``PERMISSIONS_POLICY``, ``LOCAL_HOSTS``, ``DEFAULT_MAX_BODY``, ``BODY_TIMEOUT``
-``RequestInfo`` (frozen dataclass): ``https``, ``host``, ``origin``, ``trusted_peer``.
+``Origin`` (frozen dataclass): ``scheme``, ``host``, ``port``; ``str(o)`` is the browser's
+    serialisation; ``rp_id`` is the passkey site for it (None when passkeys cannot work there).
+``parse_origin(text) -> Origin``          raises ``ValueError`` with a plain message.
+``origin_for_host(name) -> Origin``       the ``--allow-host`` shorthand: ``https://NAME``.
+``Origins(public=(), *, local_port=None)``  ``accepted``, ``public``, ``match(host_header, https)``,
+    ``rp_ids()``, ``passkey_origins(rp_id)``.
+``RequestInfo`` (frozen dataclass): ``https``, ``host``, ``origin``, ``trusted_peer``, ``site``.
+``split_host(value) -> (host, port | None) | None``
 ``normalize_host(value) -> str | None``  ``"Example.org:443"`` -> ``"example.org"``; None when malformed.
-``host_allowed(host_header, allowed) -> bool``
 ``is_trusted_peer(client) -> bool``      unix socket (no peer address) or loopback.
 ``is_https(scope) -> bool``
 ``same_origin(headers, info) -> bool``
@@ -46,7 +66,7 @@ Public API
 ``security_headers(path, https) -> list[tuple[bytes, bytes]]``
 ``scrub(text) -> str``                   removes file paths from text sent to the browser.
 ``error_body(code, message, hint) -> bytes``
-``SecurityMiddleware(app, *, allowed_hosts=(), max_body=DEFAULT_MAX_BODY, body_timeout=BODY_TIMEOUT)``
+``SecurityMiddleware(app, *, origins=Origins(), max_body=DEFAULT_MAX_BODY, body_timeout=BODY_TIMEOUT)``
 ``request_info(request) -> RequestInfo``
 """
 
@@ -90,8 +110,47 @@ STATE_CHANGING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 _HOSTNAME_RE = re.compile(r"^(?=.{1,253}\Z)[a-z0-9](?:[a-z0-9-]{0,62})(?:\.[a-z0-9](?:[a-z0-9-]{0,62}))*\.?\Z")
 _PORT_RE = re.compile(r"^\d{1,5}\Z")
+# Headers that must appear at most once: every part of easy-ui has to read the same value.
+_SINGLE_HEADERS = (b"host", b"origin", b"sec-fetch-site", b"content-type")
 # A Unix path or a ~/ path, not part of a URL ("https://...") or a word ("km/h").
 _PATH_RE = re.compile(r"(?<![\w:/.])(?:~/|/)(?:[\w.@+-]+/)*[\w.@+-]*[\w@+-](?:/)?")
+
+
+@dataclass(frozen=True)
+class Origin:
+    """One exact web address: scheme, host name (lower case, IPv6 in brackets) and port."""
+
+    scheme: str
+    host: str
+    port: int
+
+    @property
+    def default_port(self) -> bool:
+        return self.port == (443 if self.scheme == "https" else 80)
+
+    def __str__(self) -> str:
+        return f"{self.scheme}://{self.host}" + ("" if self.default_port else f":{self.port}")
+
+    @property
+    def host_port(self) -> str:
+        return self.host + ("" if self.default_port else f":{self.port}")
+
+    @property
+    def is_ip(self) -> bool:
+        try:
+            ipaddress.ip_address(self.host.strip("[]"))
+        except ValueError:
+            return False
+        return True
+
+    @property
+    def rp_id(self) -> str | None:
+        """The passkey site (RP ID) for this address: its host name, over https or on http://localhost only."""
+        if self.is_ip:
+            return None
+        if self.scheme == "https" or self.host == "localhost":
+            return self.host
+        return None
 
 
 @dataclass(frozen=True)
@@ -100,13 +159,14 @@ class RequestInfo:
     host: str
     origin: str
     trusted_peer: bool
+    site: Origin | None = None
 
 
 # ---------------------------------------------------------------- pure helpers
 
 
-def normalize_host(value: str | None) -> str | None:
-    """Lower-case host name from a Host-style value, without the port; None when malformed."""
+def split_host(value: str | None) -> tuple[str, int | None] | None:
+    """``(host, port)`` from a Host-style value (port None when not given); None when malformed."""
     if not value or len(value) > 300:
         return None
     v = value.strip().lower()
@@ -125,17 +185,87 @@ def normalize_host(value: str | None) -> str | None:
         if not _HOSTNAME_RE.match(host):
             return None
         host = host.rstrip(".")
-    if rest:
-        if not rest.startswith(":") or not _PORT_RE.match(rest[1:]) or not 0 < int(rest[1:]) < 65536:
+    if not rest:
+        return host, None
+    if not rest.startswith(":") or not _PORT_RE.match(rest[1:]) or not 0 < int(rest[1:]) < 65536:
+        return None
+    return host, int(rest[1:])
+
+
+def normalize_host(value: str | None) -> str | None:
+    """Lower-case host name from a Host-style value, without the port; None when malformed."""
+    parts = split_host(value)
+    return parts[0] if parts else None
+
+
+def _bad_origin(text: Any, why: str) -> ValueError:
+    return ValueError(f"{str(text)[:80]!r} is not a web address easy-ui can use ({why}).")
+
+
+def parse_origin(text: Any) -> Origin:
+    """``https://name[:port]`` or ``http://name[:port]`` (a trailing ``/`` is allowed); nothing else."""
+    if not isinstance(text, str) or not text or len(text) > 300:
+        raise _bad_origin(text, "it is empty or too long")
+    t = text.strip()
+    scheme, sep, rest = t.partition("://")
+    scheme = scheme.lower()
+    if not sep or scheme not in ("http", "https"):
+        raise _bad_origin(text, "it must start with https:// or http://")
+    rest = rest.removesuffix("/")
+    if not rest or any(c in rest for c in "/?#@\\ \t\r\n%"):
+        raise _bad_origin(text, "give only the scheme, the name and maybe a port, without a path")
+    parts = split_host(rest)
+    if parts is None or not parts[0]:
+        raise _bad_origin(text, "the name or the port is not valid")
+    host, port = parts
+    return Origin(scheme, host, port if port is not None else (443 if scheme == "https" else 80))
+
+
+def origin_for_host(name: Any) -> Origin:
+    """The ``--allow-host NAME`` shorthand: ``https://NAME`` on the default port."""
+    if not isinstance(name, str):
+        raise _bad_origin(name, "it is not text")
+    parts = split_host(name)
+    if parts is None or parts[1] is not None or not parts[0]:
+        raise _bad_origin(name, "give a host name without a port, or use --origin https://NAME:PORT")
+    return Origin("https", parts[0], 443)
+
+
+class Origins:
+    """The exact web addresses this server answers to (see the module docstring)."""
+
+    def __init__(self, public: Iterable[Origin | str] = (), *, local_port: int | None = None) -> None:
+        self.public: tuple[Origin, ...] = tuple(
+            dict.fromkeys(o if isinstance(o, Origin) else parse_origin(o) for o in public)
+        )
+        self.local_port = int(local_port) if local_port else None
+        if self.public:
+            self.accepted = self.public
+        elif self.local_port:
+            self.accepted = tuple(Origin("http", h, self.local_port) for h in ("localhost", "127.0.0.1", "[::1]"))
+        else:
+            self.accepted = ()
+
+    def match(self, host_header: str | None, https: bool = False) -> Origin | None:
+        """The accepted origin a request's Host header names (name and port), or None."""
+        parts = split_host(host_header)
+        if parts is None:
             return None
-    return host
+        host, port = parts
+        found = [o for o in self.accepted if o.host == host and (o.port == port if port is not None else o.default_port)]
+        if len(found) > 1:  # http://NAME and https://NAME both configured: the connection decides
+            found = [o for o in found if (o.scheme == "https") == https] or found
+        return found[0] if found else None
 
+    def rp_ids(self) -> frozenset[str]:
+        return frozenset(o.rp_id for o in self.accepted if o.rp_id)
 
-def host_allowed(host_header: str | None, allowed: Iterable[str]) -> bool:
-    host = normalize_host(host_header)
-    if host is None:
-        return False
-    return host in LOCAL_HOSTS or host in {h.lower().rstrip(".") for h in allowed}
+    def passkey_origins(self, rp_id: str) -> frozenset[str]:
+        """The configured origins a passkey answer for ``rp_id`` may come from."""
+        return frozenset(str(o) for o in self.accepted if o.rp_id == rp_id)
+
+    def describe(self) -> str:
+        return ", ".join(str(o) for o in self.accepted) or "no address"
 
 
 def is_trusted_peer(client: Any) -> bool:
@@ -169,19 +299,15 @@ def is_https(scope: dict[str, Any]) -> bool:
 
 
 def same_origin(headers: dict[str, str], info: RequestInfo) -> bool:
-    """The rule for state-changing requests (see the module docstring, step 4)."""
+    """The rule for state-changing requests (see the module docstring, step 5)."""
     site = headers.get("sec-fetch-site")
     if site is not None and site.strip().lower() != "same-origin":
         return False
     origin = headers.get("origin")
     if origin is None:
         return site is not None
-    o = origin.strip().lower()
-    if o == info.origin:
-        return True
-    # Behind a TLS proxy that does not say so, the browser's origin is https while the
-    # request looks like plain http. Accept that (same host and port only), never the reverse.
-    return not info.https and o == "https://" + info.origin.removeprefix("http://")
+    # Exactly the configured origin this request was matched to: scheme, name and port.
+    return bool(info.origin) and origin.strip().lower() == info.origin
 
 
 def is_json_content_type(value: str | None) -> bool:
@@ -231,10 +357,8 @@ def error_body(code: str, message: str, hint: str | None) -> bytes:
 
 def request_info(request: Any) -> RequestInfo:
     info = request.scope.get("state", {}).get("easyui")
-    if info is None:  # only when the middleware is not installed (never in the real app)
-        https = is_https(request.scope)
-        host = normalize_host(request.headers.get("host")) or "localhost"
-        info = RequestInfo(https, host, ("https://" if https else "http://") + host, is_trusted_peer(request.scope.get("client")))
+    if info is None:  # only when the middleware is not installed (never in the real app): match nothing
+        info = RequestInfo(is_https(request.scope), "", "", is_trusted_peer(request.scope.get("client")), None)
     return info
 
 
@@ -243,11 +367,11 @@ def request_info(request: Any) -> RequestInfo:
 
 class SecurityMiddleware:
     def __init__(
-        self, app: Any, *, allowed_hosts: Iterable[str] = (), max_body: int = DEFAULT_MAX_BODY, body_timeout: float = BODY_TIMEOUT
+        self, app: Any, *, origins: Origins | None = None, max_body: int = DEFAULT_MAX_BODY, body_timeout: float = BODY_TIMEOUT
     ) -> None:
         self.app = app
         self.body_timeout = float(body_timeout)
-        self.allowed_hosts = frozenset(h.lower().rstrip(".") for h in allowed_hosts)
+        self.origins = origins if origins is not None else Origins()
         self.max_body = int(max_body)
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
@@ -291,23 +415,29 @@ class SecurityMiddleware:
             )
             await send({"type": "http.response.body", "body": body if scope.get("method") != "HEAD" else b""})
 
+        raw_headers = scope.get("headers") or ()
+        for name in _SINGLE_HEADERS:
+            if sum(1 for k, _ in raw_headers if k == name) > 1:
+                await refuse(
+                    400,
+                    "bad_request",
+                    f"The request had more than one {name.decode().title()} header, so it was refused.",
+                    "Send the request again from the dashboards page.",
+                )
+                return
         host_header = _header(scope, b"host")
-        if not host_allowed(host_header, self.allowed_hosts):
+        site = self.origins.match(host_header, https)
+        if site is None:
             await refuse(
                 400,
                 "unknown_host",
-                "This server was reached under a name it does not answer to, so it refused the request. "
+                "This server was reached under a name or port it does not answer to, so it refused the request. "
                 "This protects your dashboards from other web sites that try to reach them.",
-                "Open the dashboards with the address easy-ui gave you (for example http://localhost:PORT). "
-                "If you use a new name for this server, add it with easy-ui serve --allow-host NAME.",
+                "Open the dashboards with the address easy-ui gave you. If this server has a new address, start it "
+                "with easy-ui serve --origin https://NAME (or --allow-host NAME).",
             )
             return
-        host = normalize_host(host_header) or "localhost"
-        port = ""
-        raw = (host_header or "").strip().lower()
-        if raw.rsplit("]", 1)[-1].count(":") == 1:
-            port = ":" + raw.rsplit(":", 1)[1]
-        info = RequestInfo(https, host + port, ("https://" if https else "http://") + host + port, is_trusted_peer(scope.get("client")))
+        info = RequestInfo(https, site.host_port, str(site), is_trusted_peer(scope.get("client")), site)
         scope.setdefault("state", {})["easyui"] = info
 
         method = scope.get("method", "GET").upper()

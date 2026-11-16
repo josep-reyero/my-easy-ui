@@ -9,8 +9,12 @@ timing of the lookup tells them nothing useful about a real id.
 Every session has two lifetimes: it ends after ``idle`` seconds without use
 (default 7 days) and in any case ``absolute`` seconds after sign-in (default 30
 days). Sign-in always creates a new session (the old one, if the browser sent
-one, is removed first), and sign-out removes it. Setting a new password removes
-every session.
+one, is removed first), and sign-out removes it. Each session remembers how it
+was made (``how``: ``password``, ``passkey``, ``recovery`` or ``preview``). Setting a
+new password removes every session; changing how signing in works (removing a
+passkey, turning password sign-in on or off, making new recovery codes) ends
+every other session (``clear_others``) on the page, and every session from the
+command line.
 
 The file is written atomically with owner-only permissions (0600) under a lock
 file, and the store re-reads it whenever it changes on disk, so
@@ -26,10 +30,11 @@ Public API
 ``write_private_json(path, data)``      atomic write, mode 0600, missing folders created 0700.
 ``ensure_private_dir(path) -> Path``    creates missing folders with mode 0700.
 ``locked(path)``                        context manager: an exclusive ``fcntl`` lock on ``path``.
-``Session`` (frozen dataclass): ``key`` (the stored hash), ``created``, ``seen``, ``device``.
+``Session`` (frozen dataclass): ``key`` (the stored hash), ``created``, ``seen``, ``device``, ``how``.
 ``SessionStore(auth_dir, *, idle=IDLE_SECONDS, absolute=ABSOLUTE_SECONDS, clock=time.time)``
-    ``create(device=None) -> (secret, Session)``, ``get(secret) -> Session | None``
+    ``create(device=None, how=None) -> (secret, Session)``, ``get(secret) -> Session | None``
     (also refreshes "last used"), ``delete(secret) -> bool``, ``clear() -> int``,
+    ``clear_others(keep_key) -> int`` (ends every session but the one with that stored hash),
     ``count() -> int``, ``max_age() -> int`` (cookie lifetime in seconds).
 """
 
@@ -134,6 +139,7 @@ class Session:
     created: float
     seen: float
     device: str | None = None
+    how: str | None = None
 
 
 class SessionStore:
@@ -198,17 +204,17 @@ class SessionStore:
     def max_age(self) -> int:
         return self.absolute
 
-    def create(self, device: str | None = None) -> tuple[str, Session]:
+    def create(self, device: str | None = None, how: str | None = None) -> tuple[str, Session]:
         secret = new_secret()
         key = digest(secret)
         now = self.clock()
         with locked(self.lock_path):
             sessions = self._sweep(dict(self._load()), now)
-            sessions[key] = {"created": now, "seen": now, "device": device}
+            sessions[key] = {"created": now, "seen": now, "device": device, "how": how}
             if len(sessions) > MAX_SESSIONS:
                 sessions = self._sweep(sessions, now)
             self._save(sessions)
-        return secret, Session(key, now, now, device)
+        return secret, Session(key, now, now, device, how)
 
     def get(self, secret: str | None) -> Session | None:
         if not secret or not isinstance(secret, str) or len(secret) > _SECRET_MAX:
@@ -233,7 +239,8 @@ class SessionStore:
                     current[key] = {**current[key], "seen": now}
                     self._save(current)
                     seen = now
-        return Session(key, float(rec["created"]), seen, rec.get("device"))
+        how = rec.get("how")
+        return Session(key, float(rec["created"]), seen, rec.get("device"), how if isinstance(how, str) else None)
 
     def delete(self, secret: str | None) -> bool:
         if not secret or not isinstance(secret, str) or len(secret) > _SECRET_MAX:
@@ -251,6 +258,16 @@ class SessionStore:
         with locked(self.lock_path):
             n = len(self._load())
             self._save({})
+        return n
+
+    def clear_others(self, keep_key: str) -> int:
+        """End every session except the one whose stored hash is ``keep_key``; how many were ended."""
+        with locked(self.lock_path):
+            current = dict(self._load())
+            kept = {k: v for k, v in current.items() if k == keep_key}
+            n = len(current) - len(kept)
+            if n:
+                self._save(kept)
         return n
 
     def count(self) -> int:

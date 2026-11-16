@@ -20,7 +20,7 @@ Contract for a feature module
   never ``"command"``.
 - Every leaf parser sets ``set_defaults(func=handler)``. ``handler(args)``
   gets the ``argparse.Namespace`` with ``args.json`` (bool) and
-  ``args.project_dir`` (also as ``args.app_dir``) and ``args.ui_dir`` (``Path | None``) already set. Use
+  ``args.project_dir`` (also as ``args.app_dir``), ``args.ui_dir`` and ``args.auth_dir`` (``Path | None``) already set. Use
   ``easyui.cli.load_config(args)`` to get the ``AppConfig``.
 - Return the data (dict, list, str or None) or a ``Result(data, text=None,
   exit_code=0, json_line=False)`` to also give the plain-language text shown
@@ -35,7 +35,7 @@ Contract for a feature module
 - Text shown without ``--json`` goes through ``safe_text``: control
   characters (which could clear or retitle the terminal, or fake a line) from
   dashboard files are shown as visible escapes such as ``\x1b``.
-- ``--json``, ``--project-dir PATH`` (old name ``--app-dir``) and ``--ui-dir PATH`` are taken off the command line before
+- ``--json``, ``--project-dir PATH`` (old name ``--app-dir``), ``--ui-dir PATH`` and ``--auth-dir PATH`` are taken off the command line before
   parsing, so they work in any position; do not add them yourself.
 
 Exit codes: 0 ok, 1 error, 2 usage, 3 not found, 4 not allowed, 5 refused
@@ -173,7 +173,8 @@ def print_now(data: Any, text: str, json_mode: bool) -> None:
 
 
 def load_config(args: argparse.Namespace) -> AppConfig:
-    return appconfig.load(getattr(args, "app_dir", None), ui_dir=getattr(args, "ui_dir", None))
+    return appconfig.load(getattr(args, "app_dir", None), ui_dir=getattr(args, "ui_dir", None),
+                          auth_dir=getattr(args, "auth_dir", None))
 
 
 # ---------------------------------------------------------------- commands
@@ -319,13 +320,15 @@ def build_parser() -> tuple[ArgumentParser, list[str]]:
         prog="easy-ui",
         description="Dashboards for one project: declarative views over a read-only copy of its data.",
         epilog="Every command accepts --json (only JSON on stdout), --project-dir PATH (default: the nearest folder "
-        "with project.toml) and --ui-dir PATH (the project's dashboard folder, when it is not the usual one), "
-        "before or after the command.",
+        "with project.toml), --ui-dir PATH (the project's dashboard folder, when it is not the usual one) and "
+        "--auth-dir PATH (its sign-in folder), before or after the command.",
     )
     parser.add_argument("--version", action="version", version=f"easy-ui {__version__}")
     parser.add_argument("--json", action="store_true", help="print only JSON on stdout")
     parser.add_argument("--project-dir", metavar="PATH", help="the project's folder (the one holding project.toml)")
-    parser.add_argument("--ui-dir", metavar="PATH", help="the project's dashboard folder (published dashboards, data, sign-in)")
+    parser.add_argument("--ui-dir", metavar="PATH", help="the project's dashboard folder (published dashboards, data)")
+    parser.add_argument("--auth-dir", metavar="PATH", help="the project's sign-in folder (password hash, passkeys, "
+                        "sessions); on a server <MES_ROOT>/<project>/auth")
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
     p = sub.add_parser("components", help="The dashboard vocabulary: components, settings, formats (for agents).")
@@ -370,12 +373,12 @@ def build_parser() -> tuple[ArgumentParser, list[str]]:
 
 # Taken off the command line before parsing, so they work before or after the command.
 # --app-dir is the v0.1 name of --project-dir and still works.
-_FOLDER_OPTIONS = {"--project-dir": "project_dir", "--app-dir": "project_dir", "--ui-dir": "ui_dir"}
+_FOLDER_OPTIONS = {"--project-dir": "project_dir", "--app-dir": "project_dir", "--ui-dir": "ui_dir", "--auth-dir": "auth_dir"}
 
 
 def _extract(argv: list[str]) -> tuple[bool, dict[str, Path | None], list[str]]:
     json_mode = False
-    folders: dict[str, Path | None] = {"project_dir": None, "ui_dir": None}
+    folders: dict[str, Path | None] = {"project_dir": None, "ui_dir": None, "auth_dir": None}
     rest: list[str] = []
     i = 0
     while i < len(argv):
@@ -430,6 +433,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         args.app_dir = folders["project_dir"]
         args.project_dir = folders["project_dir"]
         args.ui_dir = folders["ui_dir"]
+        args.auth_dir = folders["auth_dir"]
         func = getattr(args, "func", None)
         if func is None:
             if args.command == "data":

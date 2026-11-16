@@ -18,7 +18,7 @@ import httpx
 import pytest
 from argon2 import PasswordHasher, Type
 
-from conftest import run_cli, run_cli_json
+from conftest import run_cli, run_cli_json, site_settings
 from easyui import auth, bundle, sandbox, security, server, spec
 from easyui.errors import NotFound, Refused, UsageError
 
@@ -139,6 +139,7 @@ class Env:
 
     def make(self, *, source=None, base="http://localhost", client=("testclient", 50000), raise_errors=True, **settings):
         settings.setdefault("web_dir", self.web_dir)
+        site_settings(base, settings)
         asgi = server.create_app(
             self.cfg,
             server.ServerSettings(**settings),
@@ -293,14 +294,15 @@ def test_cookie_over_https_uses_host_prefix_and_secure(env):
 
 
 def test_forwarded_proto_is_trusted_only_from_a_loopback_peer(env):
-    trusted = env.make(client=("127.0.0.1", 40000))
+    # The proxy talks plain http to the server; the configured origin is the browser's https address.
+    trusted = env.make(client=("127.0.0.1", 40000), origins=("https://localhost",))
     r = login(trusted, origin="https://localhost", **{"x-forwarded-proto": "https"})
     assert r.status_code == 200
     assert "__Host-easyui-demo" in _cookies(r)
     assert "strict-transport-security" in r.headers
 
-    untrusted = env.make(client=("203.0.113.7", 40000))
-    r = login(untrusted, **{"x-forwarded-proto": "https"})
+    untrusted = env.make(client=("203.0.113.7", 40000), origins=("https://localhost",))
+    r = login(untrusted, origin="https://localhost", **{"x-forwarded-proto": "https"})
     assert r.status_code == 200
     assert "easyui-demo" in _cookies(r) and "strict-transport-security" not in r.headers
 
@@ -406,9 +408,14 @@ def test_state_changing_requests_need_same_origin(client):
     assert client.post("/api/login", json=body, headers={"origin": "http://localhost"}).status_code == 200
 
 
-def test_https_origin_on_plain_http_request_is_accepted_but_not_the_reverse(env):
+def test_the_origin_must_be_exactly_the_configured_one(env):
+    # Local use: only http://localhost:PORT, so an https page (another program on this computer) is refused.
     plain = env.make()
-    assert login(plain, origin="https://localhost").status_code == 200
+    assert login(plain, origin="https://localhost").status_code == 403
+    # Behind a TLS proxy that talks plain http to the server: the configured https origin, never the http one.
+    proxied = env.make(origins=("https://localhost",))
+    assert login(proxied, origin="https://localhost").status_code == 200
+    assert login(proxied, origin="http://localhost").status_code == 403
     tls = env.make(base="https://localhost")
     assert login(tls, origin="http://localhost").status_code == 403
 
@@ -449,15 +456,22 @@ def test_unknown_host_names_are_refused(signed_in, host):
     assert signed_in.get("/", headers={"host": host}).status_code == 400
 
 
-@pytest.mark.parametrize("host", ["localhost", "localhost:8765", "127.0.0.1", "127.0.0.1:8765", "[::1]", "[::1]:8765", "LOCALHOST"])
+@pytest.mark.parametrize("host", ["localhost", "localhost:80", "127.0.0.1", "127.0.0.1:80", "[::1]", "[::1]:80", "LOCALHOST"])
 def test_local_host_names_are_accepted(signed_in, host):
-    origin = "http://" + host.lower()
+    origin = "http://" + host.lower().removesuffix(":80")  # browsers leave out the default port
     r = signed_in.post("/api/query", json={"dashboard": "overview", "queries": ["totals"]}, headers={"host": host, "origin": origin})
     assert r.status_code == 200
 
 
+@pytest.mark.parametrize("host", ["localhost:8765", "127.0.0.1:9999", "[::1]:81"])
+def test_local_names_on_another_port_are_refused(signed_in, host):
+    """The server listens on port 80 here: a page on another port of this computer is another site."""
+    r = signed_in.get("/api/dashboards", headers={"host": host})
+    assert_error(r, 400, "unknown_host")
+
+
 def test_configured_host_names(env):
-    c = env.make(base="https://dash.example.ts.net", allowed_hosts=("dash.example.ts.net",))
+    c = env.make(base="https://dash.example.ts.net", origins=("https://dash.example.ts.net",))
     assert login(c).status_code == 200
     assert c.get("/api/dashboards").status_code == 200
     assert c.get("/api/dashboards", headers={"host": "other.example.ts.net"}).status_code == 400
@@ -564,7 +578,7 @@ def test_a_failing_query_does_not_blank_the_others(env):
 def test_no_data_yet(demo_app, web_dir):
     cfg = demo_app.config()
     auth.set_password(cfg.state.auth, PW)
-    c = TestClient(server.create_app(cfg, server.ServerSettings(web_dir=web_dir), source=DirSource(cfg)), base_url="http://localhost")
+    c = TestClient(server.create_app(cfg, server.ServerSettings(web_dir=web_dir, local_port=80), source=DirSource(cfg)), base_url="http://localhost")
     login(c)
     err = assert_error(query(c, {"dashboard": "overview", "queries": ["totals"]}), 503, "no_data")
     assert "data build" in err["hint"]
@@ -790,7 +804,7 @@ def test_idle_watcher_stops_the_server(built_app, web_dir):
     cfg = built_app.config()
     stopped = threading.Event()
     asgi = server.create_app(
-        cfg, server.ServerSettings(web_dir=web_dir, idle_seconds=0.3), source=DirSource(cfg), on_idle=stopped.set
+        cfg, server.ServerSettings(web_dir=web_dir, idle_seconds=0.3, local_port=80), source=DirSource(cfg), on_idle=stopped.set
     )
     with TestClient(asgi, base_url="http://localhost") as c:
         t0 = time.monotonic()
@@ -805,7 +819,7 @@ def test_activity_keeps_the_server_running(built_app, web_dir):
     auth.set_password(cfg.state.auth, PW)
     stopped = threading.Event()
     asgi = server.create_app(
-        cfg, server.ServerSettings(web_dir=web_dir, idle_seconds=0.4), source=DirSource(cfg), on_idle=stopped.set
+        cfg, server.ServerSettings(web_dir=web_dir, idle_seconds=0.4, local_port=80), source=DirSource(cfg), on_idle=stopped.set
     )
     with TestClient(asgi, base_url="http://localhost") as c:
         login(c)
@@ -822,7 +836,7 @@ def test_activity_keeps_the_server_running(built_app, web_dir):
 
 def test_preview_token_signs_in_and_leaves_the_address(env):
     asgi = server.create_app(
-        env.cfg, server.ServerSettings(web_dir=env.web_dir), source=DirSource(env.cfg), preview_token="tok-" + "a" * 30
+        env.cfg, server.ServerSettings(web_dir=env.web_dir, local_port=8750), source=DirSource(env.cfg), preview_token="tok-" + "a" * 30
     )
     c = TestClient(asgi, base_url="http://127.0.0.1:8750", follow_redirects=False)
     r = c.get("/?token=wrong")
@@ -839,7 +853,7 @@ def test_preview_token_signs_in_and_leaves_the_address(env):
 def test_preview_link_works_once_and_a_new_one_is_offered(env):
     used = []
     asgi = server.create_app(
-        env.cfg, server.ServerSettings(web_dir=env.web_dir), source=DirSource(env.cfg),
+        env.cfg, server.ServerSettings(web_dir=env.web_dir, local_port=8750), source=DirSource(env.cfg),
         preview_token="tok-" + "b" * 30, on_preview_link_used=used.append,
     )
     first = TestClient(asgi, base_url="http://127.0.0.1:8750", follow_redirects=False)
@@ -974,7 +988,7 @@ def test_serve_end_to_end_on_a_unix_socket_and_stops_when_idle(built_app, short_
     previous_heap = sandbox.set_heap_limit(0)
 
     def run():
-        out["result"] = run_cli("--json", "serve", "--socket", str(path), "--idle-minutes", "0.02")
+        out["result"] = run_cli("--json", "serve", "--socket", str(path), "--idle-minutes", "0.02", "--origin", "http://localhost")
 
     t = threading.Thread(target=run, daemon=True)
     t.start()
@@ -1062,7 +1076,7 @@ def test_default_source_serves_published_dashboards(built_app, web_dir):
     publish = pytest.importorskip("easyui.publish")
     cfg = built_app.config()
     auth.set_password(cfg.state.auth, PW)
-    c = TestClient(server.create_app(cfg, server.ServerSettings(web_dir=web_dir)), base_url="http://localhost")
+    c = TestClient(server.create_app(cfg, server.ServerSettings(web_dir=web_dir, local_port=80)), base_url="http://localhost")
     login(c)
     assert c.get("/api/dashboards").json() == []
     publish.publish(cfg)
@@ -1077,7 +1091,7 @@ def test_preview_through_the_preview_part(built_app):
     cfg = built_app.config()
     p = preview.prepare(cfg)
     try:
-        asgi = preview._server_app(p)
+        asgi = preview._server_app(p, port=8750)
         c = TestClient(asgi, base_url="http://127.0.0.1:8750", follow_redirects=False)
         assert c.get(f"/?token={p.token}").status_code == 303
         assert {d["slug"] for d in c.get("/api/dashboards").json()} >= {"overview", "activities"}

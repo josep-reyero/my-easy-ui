@@ -69,14 +69,17 @@ from __future__ import annotations
 import contextlib
 import difflib
 import math
+import os
 import re
 import sqlite3
+import stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from easyui import paths
 from easyui.errors import NoData, ParamError, QueryError, QueryRefused, QueryTimeout
 
 PARAM_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,30}\Z")
@@ -382,23 +385,40 @@ def _check_params(params: dict[str, Any] | None, needed: list[str], name: str | 
     return out
 
 
+def _fd_path(fd: int) -> str:
+    """A name for an open file that SQLite can open: the descriptor's entry under /dev/fd (or /proc/self/fd)."""
+    return f"/dev/fd/{fd}" if os.path.isdir("/dev/fd") else f"/proc/self/fd/{fd}"
+
+
 class Sandbox:
     """One sandboxed, read-only connection to a data bundle."""
 
     def __init__(self, bundle_path: str | Path, limits: Limits = DEFAULT_LIMITS) -> None:
-        path = Path(bundle_path)
-        if not path.is_file():
+        path = Path(os.path.abspath(bundle_path))
+        # The bundle and its folder are opened without following links (on a server another account writes
+        # them), and SQLite reads the file through that open descriptor.
+        try:
+            self._fd = paths.open_nofollow(path, 2)
+        except OSError:
+            self._fd = -1
+        if self._fd < 0 or not stat.S_ISREG(os.fstat(self._fd).st_mode):
+            if self._fd >= 0:
+                os.close(self._fd)
             raise NoData(
                 "There is no dashboard data yet, so the dashboards have nothing to show.",
                 hint="Build it with: easy-ui data build",
             )
-        self.path = path.resolve()
+        self.path = path
         self.limits = limits
         self._deadline = math.inf
         self._denied: list[str] = []
         self._ctes: frozenset[str] = frozenset()
-        uri = "file:" + quote(str(self.path)) + "?mode=ro&immutable=1"
-        self.conn = sqlite3.connect(uri, uri=True, isolation_level=None, check_same_thread=False)
+        uri = "file:" + quote(_fd_path(self._fd)) + "?mode=ro&immutable=1"
+        try:
+            self.conn = sqlite3.connect(uri, uri=True, isolation_level=None, check_same_thread=False)
+        except BaseException:
+            os.close(self._fd)
+            raise
         try:
             if hasattr(self.conn, "enable_load_extension"):
                 self.conn.enable_load_extension(False)
@@ -428,6 +448,7 @@ class Sandbox:
             self.conn.set_progress_handler(self._progress, PROGRESS_STEPS)
         except BaseException:
             self.conn.close()
+            os.close(self._fd)
             raise
 
     # --- callbacks -----------------------------------------------------------
@@ -473,6 +494,9 @@ class Sandbox:
 
     def close(self) -> None:
         self.conn.close()
+        if self._fd >= 0:
+            os.close(self._fd)
+            self._fd = -1
 
     def __enter__(self) -> Sandbox:
         return self

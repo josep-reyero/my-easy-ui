@@ -35,14 +35,16 @@ Public API
     ``accent`` (str | None), ``dashboards`` (tuple of slugs: the menu order; the first one
     is the landing page; dashboards not listed follow by name), ``version`` (str | None),
     ``refresh_after`` (tuple of job names, for mes), ``ui_dir`` (Path | None: a ui folder
-    given with ``--ui-dir``), ``from_ui_dir`` (bool). Properties: ``dashboards_dir``
+    given with ``--ui-dir``), ``from_ui_dir`` (bool), ``auth_dir`` (Path | None: a sign-in folder
+    given with ``--auth-dir``). Properties: ``dashboards_dir``
     (``<app_dir>/ui/dashboards``), ``data_dir`` (the project's data folder),
-    ``state`` (``paths.StatePaths`` of the ui folder). Methods: ``source_db()`` (Path of the
+    ``state`` (``paths.StatePaths`` of the ui folder; its ``auth`` is the sign-in folder,
+    see ``easyui.paths``). Methods: ``source_db()`` (Path of the
     project's SQLite file; raises ``ConfigError`` when ``[ui] data`` is missing),
     ``require_tables()`` (raises ``ConfigError`` when the allowlist is empty),
     ``to_dict()``, ``public()`` (``{name, title, accent}`` for the browser),
     ``snapshot()`` (what ``project.json`` holds).
-``load(app_dir=None, *, ui_dir=None) -> AppConfig``
+``load(app_dir=None, *, ui_dir=None, auth_dir=None) -> AppConfig``
     ``app_dir`` is the project's folder or its ``project.toml``; ``None`` means the
     nearest folder at or above the current directory holding ``project.toml``, and
     when there is none and ``ui_dir`` is given, the ``project.json`` in that folder.
@@ -97,6 +99,7 @@ class AppConfig:
     refresh_after: tuple[str, ...] = field(default_factory=tuple)
     ui_dir: Path | None = None
     from_ui_dir: bool = False
+    auth_dir: Path | None = None
 
     @property
     def dashboards_dir(self) -> Path:
@@ -109,8 +112,9 @@ class AppConfig:
     @property
     def state(self) -> paths.StatePaths:
         if self.ui_dir is not None:
-            return paths.StatePaths(self.ui_dir)
-        return paths.state_paths(self.name)
+            return paths.StatePaths(self.ui_dir, self.auth_dir or paths.auth_dir(self.name, self.ui_dir))
+        sp = paths.state_paths(self.name)
+        return sp if self.auth_dir is None else paths.StatePaths(sp.root, self.auth_dir)
 
     def source_db(self) -> Path:
         if self.from_ui_dir:
@@ -303,7 +307,7 @@ def load_snapshot(ui_dir: str | Path) -> AppConfig:
     root = Path(ui_dir).expanduser().resolve()
     f = root / paths.PROJECT_FILE
     try:
-        raw = f.read_bytes()[: MAX_SNAPSHOT_BYTES + 1]
+        raw = paths.read_nofollow(f, 1, MAX_SNAPSHOT_BYTES)  # the project's account writes this folder
         data = json.loads(raw) if len(raw) <= MAX_SNAPSHOT_BYTES else None
     except FileNotFoundError:
         data = {}
@@ -357,7 +361,15 @@ def write_snapshot(config: AppConfig) -> None:
         raise
 
 
-def load(app_dir: str | Path | None = None, *, ui_dir: str | Path | None = None) -> AppConfig:
+def load(app_dir: str | Path | None = None, *, ui_dir: str | Path | None = None,
+         auth_dir: str | Path | None = None) -> AppConfig:
+    cfg = _load(app_dir, ui_dir=ui_dir)
+    if auth_dir is not None:
+        cfg = dataclasses.replace(cfg, auth_dir=Path(os.path.abspath(Path(auth_dir).expanduser())))
+    return cfg
+
+
+def _load(app_dir: str | Path | None = None, *, ui_dir: str | Path | None = None) -> AppConfig:
     if app_dir is None:
         found = paths.find_app_dir()
         if found is None:

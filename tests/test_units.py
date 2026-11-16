@@ -12,7 +12,7 @@ from conftest import run_cli, run_cli_json
 from easyui import units
 from easyui.errors import UsageError
 
-SAFE: dict = {}
+SAFE: dict = {"origins": ["https://box.example.ts.net"]}
 
 SERVICE_REQUIRED = [
     "User=mes-fitness-web",
@@ -31,10 +31,11 @@ SERVICE_REQUIRED = [
     "UMask=0077",
     "TemporaryFileSystem=/var/lib/mes:ro",
     "BindReadOnlyPaths=/var/lib/mes/fitness/ui",
-    "BindPaths=/var/lib/mes/fitness/ui/auth",
-    "ExecStart=/usr/local/bin/easy-ui serve --ui-dir /var/lib/mes/fitness/ui",
+    "BindPaths=/var/lib/mes/fitness/auth",
+    ("ExecStart=/usr/local/bin/easy-ui serve --ui-dir /var/lib/mes/fitness/ui --auth-dir /var/lib/mes/fitness/auth"
+     " --origin https://box.example.ts.net"),
     "Requires=mes-fitness-web.socket",
-    'Environment="HOME=/nonexistent" "MES_CONFIG=/nonexistent"',
+    "Environment=HOME=/nonexistent MES_CONFIG=/nonexistent",
 ]
 SOCKET_REQUIRED = [
     "ListenStream=/run/mes/fitness-web.sock",
@@ -98,15 +99,24 @@ def test_no_shell_in_execstart():
     exec_line = next(v for _s, k, v in parse_unit(service) if k == "ExecStart")
     assert not re.search(r"\b(sh|bash|zsh)\b|-c\b|[;&|`]", exec_line)
     assert exec_line.split()[0].startswith("/")
+    # Nothing systemd would unquote or expand, anywhere in the service.
+    assert not re.search(r"[\"'\\%$]", exec_line)
+    body = service.split("[Unit]", 1)[1]
+    assert '"' not in body and "\\" not in body
 
 
 def test_options():
     u = units.render_units("fitness", exec_path="/opt/easy-ui/bin/easy-ui", root="/srv/mes", socket_path="/run/eui/fit.sock",
-                           socket_owner="tailscale", memory_max="128M")
+                           socket_owner="tailscale", memory_max="128M",
+                           origins=["https://Box.example.ts.net:8443/", "https://box.example.ts.net:443"],
+                           allow_hosts=["other.example.ts.net"])
     service, sock = u["mes-fitness-web.service"], u["mes-fitness-web.socket"]
     assert "User=mes-fitness-web" in service and "MemoryMax=128M" in service
-    assert "ExecStart=/opt/easy-ui/bin/easy-ui serve --ui-dir /srv/mes/fitness/ui" in service
-    assert "TemporaryFileSystem=/srv/mes:ro" in service and "BindPaths=/srv/mes/fitness/ui/auth" in service
+    assert ("ExecStart=/opt/easy-ui/bin/easy-ui serve --ui-dir /srv/mes/fitness/ui --auth-dir /srv/mes/fitness/auth "
+            "--origin https://box.example.ts.net:8443 --origin https://box.example.ts.net "
+            "--origin https://other.example.ts.net") in service.split("\n")
+    assert "TemporaryFileSystem=/srv/mes:ro" in service and "BindPaths=/srv/mes/fitness/auth" in service
+    assert "BindReadOnlyPaths=/srv/mes/fitness/ui" in service and "ui/auth" not in service.split("[Unit]")[1]
     assert "ListenStream=/run/eui/fit.sock" in sock and "SocketUser=tailscale" in sock
 
 
@@ -241,23 +251,39 @@ def test_places_and_owners_the_project_account_controls_are_refused(kw):
 
 def test_long_project_names_are_refused_for_servers():
     ok = "a" * 24  # mes-<24>-web is 32 characters
-    assert f"User=mes-{ok}-web" in units.render_units(ok)[f"mes-{ok}-web.service"]
+    assert f"User=mes-{ok}-web" in units.render_units(ok, **SAFE)[f"mes-{ok}-web.service"]
     with pytest.raises(UsageError) as ei:
-        units.render_units("a" * 25)
+        units.render_units("a" * 25, **SAFE)
     assert ei.value.code == "name_too_long"
 
 
 def test_folders_for_the_administrator():
     f = {d["path"]: d for d in units.folders("fitness")}
-    assert f["/var/lib/mes/fitness/ui/auth"] == {
-        "path": "/var/lib/mes/fitness/ui/auth", "owner": "mes-fitness-web", "group": "mes-fitness-web", "mode": "0700",
-        "why": f["/var/lib/mes/fitness/ui/auth"]["why"],
+    # The sign-in folder is beside ui/ in the root-owned project folder: the project's account owns ui/ and could
+    # rename or replace anything inside it.
+    assert f["/var/lib/mes/fitness/auth"] == {
+        "path": "/var/lib/mes/fitness/auth", "owner": "mes-fitness-web", "group": "mes-fitness-web", "mode": "0700",
+        "why": f["/var/lib/mes/fitness/auth"]["why"],
     }
+    assert "/var/lib/mes/fitness/ui/auth" not in f
     for p in ("/var/lib/mes/fitness/ui", "/var/lib/mes/fitness/ui/data", "/var/lib/mes/fitness/ui/specs"):
         assert (f[p]["owner"], f[p]["group"], f[p]["mode"]) == ("mes-fitness", "mes-fitness-web", "2750")
-    assert f["/var/lib/mes/fitness"]["mode"] == "0710"
-    text = units.render_units("fitness")["mes-fitness-web.service"]
-    assert "/var/lib/mes/fitness/ui/auth" in text.split("[Unit]")[0]  # also in the header comment
+    assert (f["/var/lib/mes/fitness"]["owner"], f["/var/lib/mes/fitness"]["mode"]) == ("root", "0711")
+    text = units.render_units("fitness", **SAFE)["mes-fitness-web.service"]
+    assert "/var/lib/mes/fitness/auth" in text.split("[Unit]")[0]  # also in the header comment
+    assert "is not used" in text.split("[Unit]")[0]  # the old ui/auth is not moved
+
+
+def test_units_need_an_origin():
+    with pytest.raises(UsageError) as ei:
+        units.render_units("fitness")
+    assert ei.value.code == "origin_needed"
+    for bad in ("box.example.ts.net", "ftp://box", "https://box/path", "https://user@box", "https://box:99999",
+                "https://bo x", "https://box\nUser=root", "https://box%2f", "https://box?x"):
+        with pytest.raises(UsageError):
+            units.render_units("fitness", origins=[bad])
+    with pytest.raises(UsageError):
+        units.render_units("fitness", allow_hosts=["box.example.ts.net:8443"])
 
 
 def test_write_units(tmp_path):
@@ -291,24 +317,31 @@ def test_cli_requires_render_only(demo_app):
 
 def test_cli_render_json(demo_app):
     code, data = run_cli_json("units", "--render-only")
+    assert code == 2 and data["error"]["code"] == "origin_needed"
+    code, data = run_cli_json("units", "--render-only", "--origin", "https://box.example.ts.net")
     assert code == 0 and data["app"] == data["project"] == "demo" and data["written"] == []
     assert data["accounts"] == {"project": "mes-demo", "web": "mes-demo-web"}
-    assert data["ui_dir"] == "/var/lib/mes/demo/ui" and data["enable"] == ["mes-demo-web.socket"]
-    assert data["socket"] == "/run/mes/demo-web.sock" and len(data["folders"]) == 5
-    assert "ExecStart=/usr/local/bin/easy-ui serve --ui-dir /var/lib/mes/demo/ui" in data["units"]["mes-demo-web.service"]
+    assert data["unit_names"] == {"socket": "mes-demo-web.socket", "service": "mes-demo-web.service"}
+    assert data["ui_dir"] == "/var/lib/mes/demo/ui" and data["auth_dir"] == "/var/lib/mes/demo/auth"
+    assert data["enable"] == ["mes-demo-web.socket"] and data["exec"] == "/usr/local/bin/easy-ui"
+    assert data["socket"] == "/run/mes/demo-web.sock" and data["socket_owner"] == "root" and len(data["folders"]) == 5
+    assert data["origins"] == ["https://box.example.ts.net"] and data["memory_max"] == "256M" and data["root"] == "/var/lib/mes"
+    assert data["exec_start"] == ["/usr/local/bin/easy-ui", "serve", "--ui-dir", "/var/lib/mes/demo/ui", "--auth-dir",
+                                  "/var/lib/mes/demo/auth", "--origin", "https://box.example.ts.net"]
+    assert "ExecStart=" + " ".join(data["exec_start"]) in data["units"]["mes-demo-web.service"].split("\n")
 
 
 def test_cli_render_text_and_out(demo_app, tmp_path):
-    code, out, _ = run_cli("units", "--render-only")
+    code, out, _ = run_cli("units", "--render-only", "--allow-host", "box.example.ts.net")
     assert code == 0 and "### mes-demo-web.socket" in out and "### mes-demo-web.service" in out
     code, out, _ = run_cli("units", "--render-only", "--root", "/srv/mes", "--out", str(tmp_path / "u"), "--json",
                            "--allow-host", "box.example.ts.net")
     data = json.loads(out)
     assert code == 0 and len(data["written"]) == 2
     text = (tmp_path / "u" / "mes-demo-web.service").read_text()
-    assert "BindReadOnlyPaths=/srv/mes/demo/ui" in text and 'EASYUI_ALLOW_HOSTS=box.example.ts.net"' in text
+    assert "BindReadOnlyPaths=/srv/mes/demo/ui" in text and " --origin https://box.example.ts.net" in text
 
 
 def test_cli_hostile_option(demo_app):
-    code, data = run_cli_json("units", "--render-only", "--root", "/srv/x\nUser=root")
+    code, data = run_cli_json("units", "--render-only", "--root", "/srv/x\nUser=root", "--origin", "https://box.example.ts.net")
     assert code == 2 and data["error"]["code"] == "usage"

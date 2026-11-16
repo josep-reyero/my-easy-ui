@@ -12,11 +12,12 @@ Both ceremonies:
 
 - ``type`` is ``public-key``; ``id`` and ``rawId`` are the same credential id
   (base64url without padding, at most 1023 bytes).
-- ``clientDataJSON`` is a UTF-8 JSON object whose ``type`` is exactly
+- ``clientDataJSON`` is a UTF-8 JSON object (no key twice, at any depth) whose ``type`` is exactly
   ``webauthn.create`` / ``webauthn.get``, whose ``challenge`` decodes to exactly
   the challenge the server issued (compared in constant time), whose ``origin``
-  is exactly one of the expected origins, and whose ``crossOrigin`` is absent or
-  false (the page must not be framed by another site).
+  is exactly one of the expected origins (the caller passes the server's configured
+  origins, never anything taken from the request), and whose ``crossOrigin`` is absent
+  or false (the page must not be framed by another site).
 - the authenticator data starts with SHA-256 of the RP ID (constant-time
   comparison), has the user-present (UP) and user-verified (UV) flags, a
   backup-state flag only together with backup-eligible, and no trailing bytes;
@@ -28,8 +29,10 @@ other attestation is accepted, so nothing about the device is trusted beyond
 the key itself); attested credential data is present and its credential id is
 the one the browser named; the public key is a COSE key of an allowed
 algorithm with matching key type and curve: ES256 (-7, P-256, point checked on
-the curve), EdDSA (-8, Ed25519) or RS256 (-257, at least 2048 bits, e = 65537
-or another odd number of at least 3).
+the curve), EdDSA (-8, Ed25519: the encoding must be canonical (y < p, no
+"negative zero") and the point must not be one of the 8 points of small order,
+like libsodium's checks; such a key would accept one fixed signature for every
+message) or RS256 (-257, 2048 to 8192 bits, an odd modulus, e = 65537).
 
 Sign-in also: the credential is one of the stored ones (the caller passes it),
 no attested credential data is present, the signature over
@@ -37,7 +40,9 @@ no attested credential data is present, the signature over
 and algorithm, the user handle (when the authenticator returns one) is the
 owner's, and the signature counter goes up whenever either side is not zero
 (a counter that does not go up can mean a copied authenticator, so it is
-refused). Passkeys that keep no counter report 0 every time; that is fine.
+refused). Passkeys that keep no counter report 0 every time; that is fine. The
+backup-eligible flag must be the one saved at registration (when the caller
+passes it): it is fixed for the life of a passkey.
 
 Public API
 ----------
@@ -51,9 +56,11 @@ Public API
 ``Registration`` (dataclass): ``credential_id`` (bytes), ``public_key`` (COSE bytes), ``alg``,
     ``sign_count``, ``aaguid`` (hex), ``backup_eligible``, ``backed_up``, ``transports``.
 ``verify_registration(credential, *, challenge, origins, rp_id, algorithms=ALGORITHMS) -> Registration``
-``Assertion`` (dataclass): ``credential_id``, ``sign_count``, ``backed_up``, ``user_handle``.
+``Assertion`` (dataclass): ``credential_id``, ``sign_count``, ``backed_up``, ``user_handle``, ``backup_eligible``.
 ``credential_id_of(credential) -> bytes``    the id a sign-in response names (checked like the rest).
-``verify_assertion(credential, *, challenge, origins, rp_id, public_key, alg, stored_sign_count, user_id) -> Assertion``
+``verify_assertion(credential, *, challenge, origins, rp_id, public_key, alg, stored_sign_count, user_id,
+backup_eligible=None) -> Assertion``
+``ed25519_key_is_safe(x) -> bool``           canonical and not of small order.
 """
 
 from __future__ import annotations
@@ -310,6 +317,49 @@ def _check_flags(ad: AuthData, rp_id: str) -> None:
 
 # ---------------------------------------------------------------- COSE keys and signatures
 
+_ED_P = 2**255 - 19
+_ED_D = (-121665 * pow(121666, -1, _ED_P)) % _ED_P
+_ED_SQRT_M1 = pow(2, (_ED_P - 1) // 4, _ED_P)
+
+
+def _ed_add(a: tuple[int, int], b: tuple[int, int]) -> tuple[int, int]:
+    """Affine addition on edwards25519 (-x^2 + y^2 = 1 + d x^2 y^2); complete, so it also doubles."""
+    (x1, y1), (x2, y2) = a, b
+    t = _ED_D * x1 * x2 * y1 * y2 % _ED_P
+    x3 = (x1 * y2 + y1 * x2) * pow(1 + t, -1, _ED_P) % _ED_P
+    y3 = (y1 * y2 + x1 * x2) * pow(1 - t, -1, _ED_P) % _ED_P
+    return x3, y3
+
+
+def ed25519_key_is_safe(x: bytes) -> bool:
+    """True when ``x`` is a canonical encoding of an Ed25519 point that is not of small order.
+
+    Refused, like libsodium does: y >= p, "negative zero" (x = 0 with the sign bit set), bytes that are not a
+    point at all, and the 8 points of small order (whatever their encoding). A key of small order would let
+    one fixed signature verify for every message.
+    """
+    if len(x) != 32:
+        return False
+    n = int.from_bytes(x, "little")
+    sign, y = n >> 255, n & ((1 << 255) - 1)
+    if y >= _ED_P:
+        return False
+    u, v = (y * y - 1) % _ED_P, (_ED_D * y * y + 1) % _ED_P
+    x2 = u * pow(v, -1, _ED_P) % _ED_P
+    xr = pow(x2, (_ED_P + 3) // 8, _ED_P)
+    if (xr * xr - x2) % _ED_P:
+        xr = xr * _ED_SQRT_M1 % _ED_P
+    if (xr * xr - x2) % _ED_P:
+        return False  # not on the curve
+    if xr == 0 and sign:
+        return False  # "negative zero": a second spelling of the same point
+    if xr & 1 != sign:
+        xr = _ED_P - xr
+    point = (xr, y)
+    for _ in range(3):  # [8]P
+        point = _ed_add(point, point)
+    return point != (0, 1)  # [8]P is the neutral element only for the 8 points of small order
+
 
 def parse_cose_key(data: bytes) -> tuple[int, Any]:
     key = cbor_decode(data)
@@ -329,6 +379,8 @@ def parse_cose_key(data: bytes) -> tuple[int, Any]:
         x = key.get(-2)
         if kty != 1 or key.get(-1) != 6 or not isinstance(x, bytes) or len(x) != 32:
             raise _refuse("the Ed25519 key is not well formed")
+        if not ed25519_key_is_safe(x):
+            raise _refuse("the Ed25519 key is not a safe key")
         try:
             return alg, ed25519.Ed25519PublicKey.from_public_bytes(x)
         except ValueError:
@@ -338,7 +390,7 @@ def parse_cose_key(data: bytes) -> tuple[int, Any]:
         if kty != 3 or not isinstance(n, bytes) or not isinstance(e, bytes) or not n or not e or len(e) > 8:
             raise _refuse("the RSA key is not well formed")
         ni, ei = int.from_bytes(n, "big"), int.from_bytes(e, "big")
-        if ni.bit_length() < 2048 or ni.bit_length() > 8192 or ei < 3 or ei % 2 == 0:
+        if ni.bit_length() < 2048 or ni.bit_length() > 8192 or ni % 2 == 0 or ei != 65537:
             raise _refuse("the RSA key is too weak or not valid")
         try:
             return alg, rsa.RSAPublicNumbers(ei, ni).public_key()
@@ -371,11 +423,26 @@ def verify_signature(alg: int, public_key_cose: bytes, signature: bytes, data: b
 # ---------------------------------------------------------------- client data
 
 
+class _RepeatedKey(Exception):
+    pass
+
+
+def _no_repeated_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for k, v in pairs:
+        if k in out:
+            raise _RepeatedKey(k)
+        out[k] = v
+    return out
+
+
 def _client_data(raw: bytes, *, kind: str, challenge: bytes, origins: frozenset[str] | set[str]) -> None:
     if len(raw) > MAX_CLIENT_DATA:
         raise _refuse("the browser's part is too long")
     try:
-        cd = json.loads(raw.decode("utf-8"))
+        cd = json.loads(raw.decode("utf-8"), object_pairs_hook=_no_repeated_keys)
+    except _RepeatedKey:
+        raise _refuse("the browser's part names a field twice") from None
     except (UnicodeDecodeError, ValueError, RecursionError):
         raise _refuse("the browser's part is not readable") from None
     if not isinstance(cd, dict):
@@ -480,6 +547,7 @@ class Assertion:
     sign_count: int
     backed_up: bool
     user_handle: bytes | None
+    backup_eligible: bool = False
 
 
 def credential_id_of(credential: Any) -> bytes:
@@ -497,6 +565,7 @@ def verify_assertion(
     alg: int,
     stored_sign_count: int,
     user_id: bytes,
+    backup_eligible: bool | None = None,
 ) -> Assertion:
     raw_id, resp = _credential_parts(credential, ("clientDataJSON", "authenticatorData", "signature"))
     cdj = b64url_decode(resp["clientDataJSON"], what="the browser's part", limit=MAX_CLIENT_DATA)
@@ -506,6 +575,12 @@ def verify_assertion(
     _check_flags(ad, rp_id)
     if ad.flags & FLAG_AT:
         raise _refuse("it unexpectedly contains a new credential")
+    if backup_eligible is not None and ad.backup_eligible != backup_eligible:
+        raise _refuse(
+            "it says something different about being synced than when it was added, which can mean it is not the "
+            "same passkey",
+            "Sign in another way, remove this passkey on the Sign-in settings page and add it again.",
+        )
     handle = resp.get("userHandle")
     user_handle = None
     if handle not in (None, ""):
@@ -519,4 +594,4 @@ def verify_assertion(
             "its use counter went backwards, which can mean the passkey was copied",
             "Sign in another way, remove this passkey on the sign-in settings page and add it again.",
         )
-    return Assertion(raw_id, ad.sign_count, ad.backed_up, user_handle)
+    return Assertion(raw_id, ad.sign_count, ad.backed_up, user_handle, ad.backup_eligible)

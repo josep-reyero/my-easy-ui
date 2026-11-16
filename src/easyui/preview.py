@@ -10,7 +10,8 @@ What it does:
    else the first by name. Only the ``[ui] tables`` are copied,
    exactly as ``easy-ui data build`` does.
 2. Serves the dashboards straight from the working folder ``ui/dashboards/``
-   on ``127.0.0.1`` only, with a one-time link in place of a password. Each
+   on ``127.0.0.1`` only (it answers only to ``127.0.0.1:PORT`` and ``localhost:PORT``,
+   with exactly the port it listens on), with a one-time link in place of a password. Each
    link signs in one browser; then a new link is printed (on stderr) for the
    next one.
 3. Watches the dashboard files (and the data file): any change changes the
@@ -394,7 +395,8 @@ def make_url(host: str, port: int, token: str) -> str:
     return f"http://{host}:{port}/?token={token}"
 
 
-def _server_app(preview: Preview, on_link_used: Callable[[str], None] | None = None) -> Any:
+def _server_app(preview: Preview, on_link_used: Callable[[str], None] | None = None, *, port: int | None = None) -> Any:
+    """The server app for the preview; it answers only on ``127.0.0.1:port`` (and localhost:port)."""
     try:
         server = importlib.import_module("easyui.server")
     except ImportError as e:
@@ -415,7 +417,10 @@ def _server_app(preview: Preview, on_link_used: Callable[[str], None] | None = N
             hint="Update my-easy-ui, or publish and use easy-ui serve instead.",
             detail="easyui.server.create_app(config, *, source, preview_token) is missing",
         )
-    extra = {"on_preview_link_used": on_link_used} if "on_preview_link_used" in params else {}
+    extra: dict[str, Any] = {"on_preview_link_used": on_link_used} if "on_preview_link_used" in params else {}
+    settings_type = getattr(server, "ServerSettings", None)
+    if "settings" in params and settings_type is not None and port:
+        extra["settings"] = settings_type(local_port=port)
     return factory(preview.config, source=preview.source, preview_token=preview.token, **extra)
 
 
@@ -458,7 +463,7 @@ def serve(preview: Preview, *, port: int = 0, on_ready: Callable[[str], None] | 
             if on_link_used is not None:
                 on_link_used(make_url(HOST, port_used, token))
 
-        app = _server_app(preview, link_used)
+        app = _server_app(preview, link_used, port=port_used)
         sandbox.set_heap_limit(HEAP_LIMIT)
         url = make_url(HOST, port_used, preview.token)
         make_config = getattr(sys.modules.get("easyui.server"), "uvicorn_config", None)

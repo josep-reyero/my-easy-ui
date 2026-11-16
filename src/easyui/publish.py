@@ -326,8 +326,8 @@ def _current_link(st: paths.StatePaths) -> Path:
 
 def current_version(where: AppConfig | paths.StatePaths) -> int | None:
     st = _state(where)
-    try:
-        target = os.readlink(_current_link(st))
+    try:  # specs/ and versions/ are reached without following links (another account writes them)
+        target = paths.readlink_nofollow(_current_link(st), 2)
     except OSError:
         return None
     m = _LINK_RE.match(target)
@@ -335,7 +335,7 @@ def current_version(where: AppConfig | paths.StatePaths) -> int | None:
         return None
     d = _versions_dir(st) / m.group(1)
     try:
-        s = os.lstat(d)
+        s = paths.lstat_nofollow(d, 3)
     except OSError:
         return None
     return int(m.group(1)) if stat.S_ISDIR(s.st_mode) else None
@@ -363,7 +363,7 @@ def _read_manifest(vdir: Path) -> dict[str, Any]:
     """The manifest of a version folder, checked; raises PublishedDamaged."""
     label = f"version {vdir.name}"
     try:
-        fd = os.open(vdir / "manifest.json", os.O_RDONLY | _O_NOFOLLOW | _O_CLOEXEC)
+        fd = paths.open_nofollow(vdir / "manifest.json", 4)  # <ui>/specs/versions/<n>/manifest.json
     except OSError:
         raise PublishedDamaged(
             f"The published {label} has no readable description (manifest.json), so easy-ui cannot trust it.",
@@ -402,7 +402,13 @@ def _read_manifest(vdir: Path) -> dict[str, Any]:
 
 def _read_version_file(vdir: Path, entry: dict[str, Any]) -> bytes:
     slug = entry["slug"]
-    dfd = os.open(vdir / "dashboards", os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC)
+    try:
+        dfd = paths.open_nofollow(vdir / "dashboards", 4, directory=True)
+    except OSError:
+        raise PublishedDamaged(
+            f"The published version {vdir.name} has no readable dashboards folder, so easy-ui does not use it.",
+            hint="Publish again with: easy-ui publish, or roll back with: easy-ui rollback",
+        ) from None
     try:
         got = _read_regular_at(dfd, f"{slug}.yaml", f"{slug}.yaml")
     finally:

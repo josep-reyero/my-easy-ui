@@ -19,6 +19,10 @@ Helpers
     the environment; ``DemoApp.env()`` gives the two variables.
 ``DemoApp``  ``base``, ``app_dir``, ``data_home``, ``state_home``, ``db_path``,
     ``name``; ``env()``, ``config()``, ``write_dashboard(slug, text)``, ``build()``.
+``site_settings(base_url, settings) -> settings``
+    For ``server.ServerSettings(**settings)`` in tests: unless ``origins`` is given, a plain-http
+    ``base_url`` becomes the local port the server "listens on" (``local_port``), and an https one
+    its one configured origin, so the server answers to exactly that address.
 ``run_cli(*argv) -> (exit_code, stdout, stderr)``   runs ``easyui.cli.run``.
 ``run_cli_json(*argv) -> (exit_code, data)``         same with ``--json``, parsed.
 
@@ -51,6 +55,19 @@ from easyui.demo import (  # noqa: E402,F401 - the demo app is part of easy-ui (
     OVERVIEW_YAML,
     make_demo_db,
 )
+
+
+def site_settings(base_url: str, settings: dict[str, Any]) -> dict[str, Any]:
+    from urllib.parse import urlsplit
+
+    if settings.get("origins"):
+        return settings
+    u = urlsplit(base_url)
+    if u.scheme == "https":
+        settings["origins"] = (f"{u.scheme}://{u.netloc}",)
+    else:
+        settings.setdefault("local_port", u.port or 80)
+    return settings
 
 
 @dataclass

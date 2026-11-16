@@ -22,13 +22,26 @@ project is under ``$MES_ROOT/<project>/``: the data in ``data/`` and the ui
 folder in ``ui/``. The ``data_dir`` override still wins for the data.
 
 The ui folder holds ``data/`` (dashboard data copies and the ``current``
-link), ``specs/`` (published dashboard versions), ``project.json`` (what the
+link), ``specs/`` (published dashboard versions) and ``project.json`` (what the
 server needs to know about the project, written by ``data build`` and
-``publish``, so the server never has to read the project's code) and
-``auth/`` (password hash, passkeys, recovery codes, sessions). On a server the
-first three are written by the project's account (``mes-<project>``) and only
-read by the web account (``mes-<project>-web``); ``auth/`` belongs to the web
-account alone.
+``publish``, so the server never has to read the project's code). On a server
+they are written by the project's account (``mes-<project>``) and only read by
+the web account (``mes-<project>-web``), which opens them without following
+links (``open_nofollow``): the project's account could otherwise point a link
+at a file only the web account may read.
+
+The sign-in folder (password hash, passkeys, recovery codes, sessions) is never
+inside the ui folder, because the project's account could rename or replace
+anything there. It is, in this order: ``--auth-dir`` when given; on a server
+``$MES_ROOT/<project>/auth`` (beside ``ui/``, in the project folder, which only
+root may change); next to a ui folder named ``ui`` (``<project>/auth``, the
+default layout on a personal machine too); and only for a ui folder chosen
+with ``EASYUI_STATE_HOME`` (tests, personal machines) ``<ui>/auth``. Before
+using it, the commands that sign people in refuse a sign-in folder that is a
+link, is not owned by the account running them, is not mode 0700, or sits in a
+folder another account (other than root) can change (``check_auth_dir``). An
+old ``ui/auth`` is never moved or read: its contents cannot be trusted, so the
+owner sets the password (and adds passkeys) again.
 
 Public API
 ----------
@@ -41,11 +54,11 @@ Public API
 ``data_dir_override(project) -> Path | None``  ``[projects.<project>] data_dir``, checked.
 ``app_data_dir(project) -> Path``         the project's data folder (override, server layout or base).
 ``ui_dir(project) -> Path``               the project's ui folder.
-``StatePaths`` (frozen dataclass)
-    ``root``, ``data``, ``specs``, ``auth``, ``current`` (= ``data/current``),
-    ``project_file`` (= ``project.json``). ``ensure()`` creates the missing folders
-    (mode 0700, or 0750 when the ui folder itself lets its group in, as on a
-    server; ``auth/`` is always 0700) and returns itself.
+``StatePaths(root, auth_root=None)`` (frozen dataclass)
+    ``root``, ``data``, ``specs``, ``auth`` (``auth_root``, else ``<root>/auth``), ``current``
+    (= ``data/current``), ``project_file`` (= ``project.json``). ``ensure()`` creates the missing
+    folders (mode 0700, or 0750 when the ui folder itself lets its group in, as on a server; the
+    sign-in folder is always 0700) and returns itself.
 ``state_paths(project, create=False) -> StatePaths``
 ``dir_mode(root) -> int``                 0750 for a group-readable ui folder, else 0700.
 ``make_dir(path, mode)``                  one folder with exactly that mode (whatever the umask).
@@ -53,6 +66,15 @@ Public API
     Nearest folder at or above ``start`` (default: current directory) holding
     ``project.toml``.
 ``find_old_manifest(start=None) -> Path | None``  the nearest ``app.toml`` (for a helpful message).
+``open_nofollow(path, depth, *, directory=False) -> int``
+    Opens ``path`` without following a link in its last ``depth`` components (the folder ``depth``
+    levels up is the trusted start). Used for everything the server reads under the ui folder,
+    which another account (the project's) writes on a server. Raises ``OSError``.
+``readlink_nofollow(path, depth) -> str``   the target of the link ``path``, same rule for its folders.
+``lstat_nofollow(path, depth) -> os.stat_result``  ``lstat`` of ``path``, same rule for its folders.
+``read_nofollow(path, depth, limit) -> bytes``  a regular file's bytes (at most ``limit + 1``).
+``auth_dir(project, ui=None) -> Path``     the sign-in folder (see below).
+``check_auth_dir(path) -> Path``           refuses an unsafe sign-in folder (``Refused``, plain words).
 ``safe_join(base, relative, *, what) -> Path``
     Joins a relative path below ``base``; raises ``ConfigError`` for absolute
     paths or paths that climb out with ``..``.
@@ -63,6 +85,7 @@ Public API
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import stat
@@ -71,7 +94,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from easyui.errors import ConfigError, UsageError
+from easyui.errors import ConfigError, Refused, UsageError
 
 MANIFEST_FILE = "project.toml"
 OLD_MANIFEST_FILE = "app.toml"
@@ -210,6 +233,7 @@ def make_dir(path: Path, mode: int) -> None:
 @dataclass(frozen=True)
 class StatePaths:
     root: Path
+    auth_root: Path | None = None
 
     @property
     def data(self) -> Path:
@@ -221,7 +245,7 @@ class StatePaths:
 
     @property
     def auth(self) -> Path:
-        return self.root / "auth"
+        return self.auth_root if self.auth_root is not None else self.root / "auth"
 
     @property
     def current(self) -> Path:
@@ -238,13 +262,147 @@ class StatePaths:
         for d in (self.data, self.specs):
             make_dir(d, shared)
         # The sign-in folder is always private to the account that runs the server.
-        make_dir(self.auth, 0o700)
+        if not self.auth.exists() and not self.auth.is_symlink():
+            if not self.auth.parent.exists():
+                self.auth.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with contextlib.suppress(OSError):  # e.g. a server's project folder: the administrator makes it
+                make_dir(self.auth, 0o700)
         return self
 
 
 def state_paths(app: str, create: bool = False) -> StatePaths:
-    sp = StatePaths(ui_dir(app))
+    ui = ui_dir(app)
+    sp = StatePaths(ui, auth_dir(app, ui))
     return sp.ensure() if create else sp
+
+
+def auth_dir(app: str, ui: Path | None = None) -> Path:
+    """The sign-in folder when ``--auth-dir`` is not given (see the module docstring)."""
+    _check_app(app)
+    root = server_root()
+    if root is not None:
+        return root / app / "auth"
+    ui = ui if ui is not None else ui_dir(app)
+    if ui.name == "ui":
+        return ui.parent / "auth"
+    return ui / "auth"
+
+
+def _auth_refused(path: Path, why: str, fix: str) -> Refused:
+    return Refused(
+        f"The sign-in folder {display_path(path)} {why}, so easy-ui does not trust what is in it and stopped. "
+        "Someone else could have put a password, passkeys or sessions there.",
+        hint=fix,
+        code="auth_dir_unsafe",
+    )
+
+
+def _changeable_by_others(st: os.stat_result) -> bool:
+    """A folder another account (not root, not this one) could change: owned by it, or group/other writable
+    without the sticky bit (with it, others cannot rename what is not theirs)."""
+    if st.st_uid not in (0, os.geteuid()):
+        return True
+    return bool(st.st_mode & 0o022) and not st.st_mode & stat.S_ISVTX
+
+
+def check_auth_dir(path: Path) -> Path:
+    """Refuse a sign-in folder that is a link, not this account's, not 0700, or in a folder others can change."""
+    path = Path(path)
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        raise _auth_refused(path, "does not exist", "Create it, owned by the account that runs the dashboards, with "
+                            "mode 0700 (the files from easy-ui units list it), then set the password with "
+                            "easy-ui set-password.") from None
+    if stat.S_ISLNK(st.st_mode):
+        raise _auth_refused(path, "is a link to another place", "Replace the link with a real folder (mode 0700, owned "
+                            "by the account that runs the dashboards) and set the password again.")
+    if not stat.S_ISDIR(st.st_mode):
+        raise _auth_refused(path, "is not a folder", "Replace it with a real folder (mode 0700) and set the password again.")
+    if st.st_uid != os.geteuid():
+        raise _auth_refused(path, "belongs to another account", "Give it to the account that runs the dashboards "
+                            "(chown), make it mode 0700, and set the password again.")
+    if stat.S_IMODE(st.st_mode) != 0o700:
+        raise _auth_refused(path, f"has mode {stat.S_IMODE(st.st_mode):04o} instead of 0700", f"Run: chmod 700 {path}")
+    parent = Path(os.path.realpath(path.parent))
+    for d in (parent, *parent.parents):
+        try:
+            dst = os.stat(d)
+        except OSError:
+            continue
+        if _changeable_by_others(dst):
+            raise _auth_refused(path, f"is inside {display_path(d)}, which another account can change",
+                                "Keep the sign-in folder in a folder only root or this account can change, for "
+                                "example /var/lib/mes/<project>/auth on a server (see easy-ui units).")
+    return path
+
+
+# ---------------------------------------------------------------- reading without following links
+
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+
+
+def _open_dir_chain(path: Path, depth: int) -> tuple[int, str]:
+    """An open folder for ``path``'s parent, reached without following links below ``depth`` levels up."""
+    path = Path(path)
+    parts = path.parts[-depth:] if depth > 0 else ()
+    if depth < 1 or len(path.parts) <= depth or any(p in ("", ".", "..") for p in parts):
+        raise OSError(f"cannot open {path} safely")
+    start = Path(*path.parts[:-depth])
+    fd = os.open(start, os.O_RDONLY | _DIRECTORY | _CLOEXEC)
+    try:
+        for name in parts[:-1]:
+            nfd = os.open(name, os.O_RDONLY | _DIRECTORY | _NOFOLLOW | _CLOEXEC, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, parts[-1]
+
+
+def open_nofollow(path: str | Path, depth: int, *, directory: bool = False) -> int:
+    dfd, name = _open_dir_chain(Path(path), depth)
+    try:
+        flags = os.O_RDONLY | _NOFOLLOW | _CLOEXEC | (_DIRECTORY if directory else os.O_NONBLOCK)
+        return os.open(name, flags, dir_fd=dfd)
+    finally:
+        os.close(dfd)
+
+
+def readlink_nofollow(path: str | Path, depth: int) -> str:
+    dfd, name = _open_dir_chain(Path(path), depth)
+    try:
+        return os.readlink(name, dir_fd=dfd)
+    finally:
+        os.close(dfd)
+
+
+def lstat_nofollow(path: str | Path, depth: int) -> os.stat_result:
+    dfd, name = _open_dir_chain(Path(path), depth)
+    try:
+        return os.stat(name, dir_fd=dfd, follow_symlinks=False)
+    finally:
+        os.close(dfd)
+
+
+def read_nofollow(path: str | Path, depth: int, limit: int) -> bytes:
+    fd = open_nofollow(path, depth)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"{path} is not a plain file")
+        chunks, total = [], 0
+        while total <= limit:
+            chunk = os.read(fd, min(65536, limit + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
 
 
 def _find(name: str, start: str | Path | None) -> Path | None:

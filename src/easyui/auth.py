@@ -94,8 +94,9 @@ Public API
 ``DeviceStore(auth_dir, clock=time.time)`` ``check(secret)``, ``issue()``, ``forget(key)``, ``clear()``.
 ``Authenticator(auth_dir, sessions, clock=time.time)``
     ``sign_in(password, *, device_secret=None, old_session=None) -> SignIn`` (blocking; run it in a
-    worker thread). ``SignIn`` has ``session_secret``, ``session``, ``device_secret`` (a new device
-    token to set, or None to keep the current one).
+    worker thread). ``SignIn`` has ``session_secret``, ``session`` (its ``how`` says which way was
+    used: ``password``, ``passkey`` or ``recovery``), ``device_secret`` (a new device token to set,
+    or None to keep the current one).
 """
 
 from __future__ import annotations
@@ -520,7 +521,7 @@ class Authenticator:
             return f"{prefix}device:{device_key[:32]}", DEVICE_CAP
         return (f"{prefix}{UNTRUSTED}" if kind else UNTRUSTED), UNTRUSTED_CAP
 
-    def _finish(self, device_key: str | None, old_session: str | None, how: str) -> SignIn:
+    def _finish(self, device_key: str | None, old_session: str | None, how: str, kind: str) -> SignIn:
         """A new session (and a device token for a browser that has none), after any successful sign-in."""
         log.info("signed in with %s from %s", how, "a browser that has signed in before" if device_key else "a new browser")
         if old_session:
@@ -531,7 +532,7 @@ class Authenticator:
         else:
             new_device = self.devices.issue()
             device_key = digest(new_device)
-        secret, session = self.sessions.create(device=device_key[:16])
+        secret, session = self.sessions.create(device=device_key[:16], how=kind)
         return SignIn(secret, session, new_device)
 
     def sign_in(self, password: Any, *, device_secret: str | None = None, old_session: str | None = None) -> SignIn:
@@ -604,11 +605,11 @@ class Authenticator:
                 if load_hash(self.dir) == stored:
                     data = read_json(password_file(self.dir), {})
                     write_private_json(password_file(self.dir), {**data, "hash": _hasher.hash(normalize(password))})
-        return self._finish(device_key, old_session, "the password")
+        return self._finish(device_key, old_session, "the password", "password")
 
     def sign_in_passkey(self, *, device_secret: str | None = None, old_session: str | None = None) -> SignIn:
         """After a verified passkey answer. Never throttled: guessing a passkey is not possible."""
-        return self._finish(self.devices.check(device_secret), old_session, "a passkey")
+        return self._finish(self.devices.check(device_secret), old_session, "a passkey", "passkey")
 
     def sign_in_recovery(self, code: Any, *, device_secret: str | None = None, old_session: str | None = None) -> SignIn:
         """One recovery code, once. Throttled like the password, in buckets of its own."""
@@ -633,4 +634,4 @@ class Authenticator:
             )
         self.throttle.succeed(bucket)
         log.warning("signed in with a recovery code; %d code(s) left", codes.left())
-        return self._finish(device_key, old_session, "a recovery code")
+        return self._finish(device_key, old_session, "a recovery code", "recovery")

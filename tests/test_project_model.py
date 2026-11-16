@@ -140,13 +140,15 @@ def test_shared_ui_folder_gets_group_readable_folders_whatever_the_umask(built_a
     assert unreadable == [], unreadable
     for p in [d for d in (ui / "specs").rglob("*") if d.is_dir()]:
         assert stat.S_IMODE(p.stat().st_mode) & 0o050 == 0o050, p
-    assert stat.S_IMODE((ui / "auth").stat().st_mode) == 0o700
+    # The sign-in folder is beside ui/, never inside it (the project's account writes ui/).
+    assert not (ui / "auth").exists() and cfg.state.auth == root / "demo" / "auth"
+    assert stat.S_IMODE((root / "demo" / "auth").stat().st_mode) == 0o700
     assert stat.S_IMODE((ui / "project.json").stat().st_mode) == 0o644
     snap = json.loads((ui / "project.json").read_text())
     assert snap == {"v": 1, "name": "demo", "title": "Demo app", "accent": "#2f6fdf",
                     "dashboards": ["overview", "activities"], "version": "0.1.0"}
     # The checklist accepts the shared layout (auth/ private, the ui folder closed to others).
-    auth.set_password(ui / "auth", "a long synthetic password")
+    auth.set_password(root / "demo" / "auth", "a long synthetic password")
     report = server.run_checks(appconfig.load(ui_dir=ui))
     state_item = next(i for i in report["items"] if i["id"] == "state_private")
     assert state_item["status"] == "ok", state_item

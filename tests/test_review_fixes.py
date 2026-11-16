@@ -124,7 +124,7 @@ def test_a_body_that_does_not_arrive_in_time_gets_408():
     async def inner(scope, receive, send):  # pragma: no cover - never reached
         raise AssertionError
 
-    mw = security.SecurityMiddleware(inner, body_timeout=0.2)
+    mw = security.SecurityMiddleware(inner, body_timeout=0.2, origins=security.Origins(local_port=1))
     sent = []
 
     async def receive():
@@ -214,7 +214,7 @@ def test_deeply_nested_json_is_a_400(demo_app):
     from starlette.testclient import TestClient
 
     cfg = demo_app.config()
-    c = TestClient(server.create_app(cfg), base_url="http://127.0.0.1:8750")
+    c = TestClient(server.create_app(cfg, server.ServerSettings(local_port=8750)), base_url="http://127.0.0.1:8750")
     body = b"[" * 30000 + b"]" * 30000
     r = c.post("/api/login", content=body, headers={"origin": "http://127.0.0.1:8750", "content-type": "application/json"})
     assert r.status_code == 400 and r.json()["error"]["code"] == "bad_json"
@@ -231,18 +231,19 @@ def test_units_refuse_administrator_and_shared_accounts(user):
 
 
 def test_units_refuse_shared_socket_owner_and_world_writable_program():
+    site = {"origins": ["https://box.example.ts.net"]}
     with pytest.raises(UsageError):
-        units.render_units("demo", socket_owner="nobody")
+        units.render_units("demo", socket_owner="nobody", **site)
     for exe in ("/tmp/evil/easy-ui", "/var/tmp/easy-ui", "/dev/shm/easy-ui"):
         with pytest.raises(UsageError) as e:
-            units.render_units("demo", exec_path=exe)
+            units.render_units("demo", exec_path=exe, **site)
         assert e.value.code == "path_refused"
-    assert "SocketUser=root" in units.render_units("demo")["mes-demo-web.socket"]
+    assert "SocketUser=root" in units.render_units("demo", **site)["mes-demo-web.socket"]
 
 
 def test_units_carry_the_allowed_host_names():
     svc = units.render_units("demo", allow_hosts=["Box.Example.ts.net"])["mes-demo-web.service"]
-    assert 'Environment="EASYUI_ALLOW_HOSTS=box.example.ts.net"' in svc
+    assert " --origin https://box.example.ts.net" in svc and "EASYUI_ALLOW_HOSTS" not in svc
     with pytest.raises(UsageError):
         units.render_units("demo", allow_hosts=["bad host\nExecStart=/bin/sh"])
 
@@ -310,7 +311,7 @@ def test_temporary_failures_say_when_to_try_again(demo_app):
     cfg = demo_app.config()
     st = cfg.state.ensure()
     auth.set_password(st.auth, PW)
-    c = TestClient(server.create_app(cfg), base_url="http://127.0.0.1:8750")
+    c = TestClient(server.create_app(cfg, server.ServerSettings(local_port=8750)), base_url="http://127.0.0.1:8750")
     origin = {"origin": "http://127.0.0.1:8750"}
     assert c.post("/api/login", json={"password": PW}, headers=origin).status_code == 200
     r = c.post("/api/query", json={"dashboard": "overview", "queries": ["totals"]}, headers=origin)
