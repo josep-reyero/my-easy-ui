@@ -1,8 +1,9 @@
 # Dashboard format: `easy-ui/v1`
 
-A dashboard is one YAML file in the project's `ui/dashboards/` folder. The file name is the page
-address: `ui/dashboards/training.yaml` is the dashboard `training`. Names use lowercase letters,
-digits and `-` (up to 41 characters, starting with a letter or digit).
+A dashboard is one YAML file in the project's `ui/dashboards/` folder, or in the `dashboards/`
+folder of one of the project's apps (see [Dashboards from apps](#dashboards-from-apps)). The file
+name is the page address: `ui/dashboards/training.yaml` is the dashboard `training`. Names use
+lowercase letters, digits and `-` (up to 41 characters, starting with a letter or digit).
 
 A dashboard is a **view**, not a program. It says which data to read (named SQL queries) and how to
 show it (a layout of fixed components). It never contains JavaScript, HTML or CSS, so anyone, or
@@ -14,25 +15,44 @@ To see what data there is, run `easy-ui tables`.
 
 ## The project's settings (`project.toml`)
 
-easy-ui reads `[project]` (`name`, `title`, `version`) and `[ui]` from the project's
-`project.toml`. Every other table (`[apps]`, `[jobs]`, `[storage]`) belongs to my-easy-software
-and is ignored. Unknown keys in `[ui]` are errors.
+easy-ui reads `[project]` (`name`, `title`, `version`, `apps`), `[ui]`, and the *names* of
+`[tables]` and `[views]` from the project's `project.toml` (my-easy-software's apps contract,
+section 1). Everything else in those tables, and `[settings]` and `[storage]`, belongs to
+my-easy-software. Unknown top-level tables and unknown keys in `[project]` or `[ui]` are errors.
 
 ```toml
 [project]
 name = "fitness"
 title = "My fitness"
+apps = ["fitness_garmin", "fitness_sleep"]    # the apps, by package name, in order
+
+[tables.days]                                 # a shared table that several apps may write
+key = ["date"]
+columns = { date = "text", steps = "integer", hours = "real" }
+
+[views.weekly]                                # a view over the shared tables
+sql = "SELECT strftime('%Y-%W', date) AS week, sum(steps) AS steps FROM days GROUP BY 1"
 
 [ui]
-data = "fitness.sqlite"                    # the project's SQLite file, inside its data folder
-tables = ["days", "activities"]            # only these tables/views are copied for dashboards
-accent = "#2f6fdf"                         # optional: the project's colour
-dashboards = ["overview", "sleep"]         # optional: menu order; the first is the landing page
-refresh_after = ["sync"]                   # optional, for mes: rebuild the data after these jobs
+accent = "#2f6fdf"                            # optional: the project's colour
+dashboards = ["overview", "sleep"]            # optional: menu order; the first is the landing page
+refresh_after = ["fitness-garmin.sync"]       # optional, for mes: rebuild the data after these jobs
+# tables = ["days", "weekly"]                 # optional: fewer tables than the default
 ```
 
-Dashboards not listed under `dashboards` follow the listed ones, by name. `easy-ui validate`
-notes a listed name that has no file.
+**The data.** Dashboards read a copy of the project's shared database,
+`<data folder>/<project>.sqlite`, made by `easy-ui data build`. Only these tables reach it
+(contract 4.6): each shared table (`[tables]`, in file order; its rows are kept per app in
+`<name>__rows`, and dashboards see only the merged view `<name>`), then each `[views]` entry, then
+each app's `[ui] tables` (in the order of `apps`). `[ui] tables` in project.toml replaces that
+list with some of its names, in its own order.
+
+**The menu.** The names in `dashboards` must exist (a project or app dashboard); the others follow
+in the order they were found: each app's dashboards, in the order of `apps`, then the project's
+own, by file name.
+
+The old forms (`[apps.<name>]`, `[jobs.<name>]`, `[ui] data`, a project without `apps`, or a
+root `app.toml`) are refused with a message saying what to change.
 
 ## A complete example
 
@@ -126,6 +146,7 @@ layout:
 | `queries` | no | Named read-only SQL queries. Needed by every component except `text` and `controls`. |
 | `layout` | yes | A list of rows; each row is a list of 1 to 6 components. |
 | `theme` | no | This dashboard's own look: `colors`, `dark`, `fonts`, `type`, `radius`, `density`, `cards`, `chart`, as in `ui/theme.yaml` (see [STYLES.md](STYLES.md)). |
+| `app` | no | The app the dashboard belongs to. easy-ui sets it on an app's dashboards when it composes them; written by hand it must name that same app. |
 
 Any other key is an error. YAML anchors and aliases (`&` / `*`), merge keys (`<<`) and repeated keys
 are errors too, so what you read is exactly what runs.
@@ -202,6 +223,20 @@ Every component also takes two settings for stylesheets (see [STYLES.md](STYLES.
 |---|---|
 | `id` | A stable name: lowercase letters, digits and `-`, starting with a letter (up to 41 characters), unique in the dashboard, not of the form `r1c2`. On the page as `data-id`. Without it the id is `r<row>c<column>`, counted from 0. |
 | `class` | One class name or a list of up to 8, for the project's stylesheets to hook on. Same characters as `id`; may not start with `eui-`. |
+| `app` | Set by easy-ui on the components an app contributes (its name); on the page as `data-app`, which scopes the app's stylesheets. Written by hand it must name the app the file belongs to. |
+
+A layout item may also be an **anchor**, a place where apps can add sections:
+
+```yaml
+layout:
+  - - type: controls
+  - anchor: activity          # sections "after:activity" go here
+  - - type: table
+      ...
+```
+
+An anchor holds only `anchor:` and a name (lowercase letters, digits and `-`), each name once per
+file. It draws nothing; a dashboard read on its own ignores its anchors.
 
 ### `stat`
 
@@ -336,6 +371,72 @@ points at the line of the file where the unknown name appears, with the closest 
 Warnings (`"level": "warning"`) point at things that work but are probably not meant: a query no
 component uses, a param no query uses, params without a control.
 
+In a composed dashboard each problem names the file it is in: a mistake in an app's section says
+`apps/<package>/dashboards/<file>.yaml` (or `<package> (installed)/...` for an installed app),
+its line, and a `place` such as `section "walks", row 1, first component (bar), setting y`.
+
+## Dashboards from apps
+
+A project's apps (see `[project] apps`) can bring dashboards, sections for other dashboards, and
+a look. easy-ui finds each app's folder in `apps.lock.json` (written by `mes apps sync`, and
+checked against project.toml: a stale list is refused with "Run: mes apps sync"), or, before
+that file exists, at `apps/<package>/` in the project. It reads every file of an app from the
+open app folder, never through a link, never outside it, and never more than a set size.
+
+An app's `app.toml` says what it brings (easy-ui reads `[app] name` and `title`,
+`[data] tables`, and `[ui]`):
+
+```toml
+[ui]
+dashboards = ["walks"]                       # dashboards/walks.yaml
+tables = ["walks_log"]                       # some of [data] tables, for dashboards to read
+
+[ui.contributes.overview]
+sections = "dashboards/overview-walks.yaml"  # sections for the dashboard "overview"
+```
+
+**Sections** are rows an app adds to another dashboard (the project's or another app's):
+
+```yaml
+spec: easy-ui/sections-v1
+sections:
+  - id: walks                    # unique in the dashboard
+    position: after:activity     # start, end, or after:<anchor>
+    queries:                     # names start with the app's table prefix (walks_)
+      walks_per_week:
+        sql: SELECT strftime('%Y-%W', date) AS week, sum(km) AS "Walked km" FROM walks_log GROUP BY 1
+    layout:
+      - - type: bar
+          title: Walking per week
+          query: walks_per_week
+          x: week
+          y: Walked km
+```
+
+A file holds up to 10 sections; each has up to 10 queries and 10 rows. Sections read the
+dashboard's params but cannot declare their own, and their query names may not clash with the
+dashboard's. Sections at the same place keep the order of `apps`. A section after an anchor the
+dashboard does not have goes to the end, with a warning; sections for a dashboard that does not
+exist are left out, with a warning.
+
+**The project has the last word.** `ui/dashboards/<name>.yaml` replaces an app's dashboard of
+that name (it keeps the app's place in the menu). `ui/sections/<app>.<dashboard>.yaml`, with the
+app's name, replaces that app's sections in that dashboard; with `sections: []` it removes them.
+Two apps with a dashboard of the same name are an error until the project adds its own.
+
+**The look.** An app's `styles/*.css`, `assets/` and `themes/*.yaml` are checked like the
+project's (see [STYLES.md](STYLES.md)). Its stylesheets apply only to what it contributes:
+easy-ui rewrites each selector `S` to `:where([data-app="<app>"]) S, S:where([data-app="<app>"])`
+and loads them before the project's, which therefore win.
+
+`easy-ui dashboards` lists the apps, every dashboard and section with the file it came from, and
+what overrides what (`--json` for agents). `easy-ui compose` prints the composition as JSON
+(`{"dashboards": [{"slug", "from", "replaces", "sections": [{"app", "id", "file", "placed"}]}],
+"order", "warnings"}`), and `easy-ui compose --out DIR` writes the composed files. Validate,
+preview (which reloads when an app's file changes), publish, export and screenshot all work on
+the composed dashboards; a published version keeps the composed files, the file and app each
+piece came from, and the project's own files.
+
 ## Compiled form (what the browser receives)
 
 The server sends `GET /api/dashboards/{slug}` as the compiled form. It contains no SQL: only
@@ -404,7 +505,8 @@ above for brevity. A dashboard with `theme:` sends, for example,
 `"theme": {"both": {"--eui-chart-line-width": "3"}, "light": {"--eui-accent": "#a2451d"}, "dark": {}}`.
 
 `table.columns` is `null` when every column should be shown in query order. `controls.params` is
-always a list.
+always a list. Every component, and the dashboard, also has `"app"`: the name of the app it came
+from, or `null` for the project's own.
 
 ### Running queries
 

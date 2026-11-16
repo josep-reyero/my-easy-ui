@@ -1,7 +1,8 @@
 """Publishing dashboards: immutable numbered versions, rollback, and reading them back.
 
-``easy-ui publish`` reads every dashboard in the project's ``ui/dashboards/``,
-validates it against the CURRENT data bundle (the structure, then each query is
+``easy-ui publish`` composes every dashboard of the project and its apps
+(``easyui.compose``: the project's ``ui/dashboards/`` and ``ui/sections/``, each
+app's dashboards and sections), validates it against the CURRENT data bundle (the structure, then each query is
 actually prepared in the sandbox and every column a component names is
 checked) and only when everything is valid stores the files as a new,
 read-only, numbered version and atomically switches ``current`` to it::
@@ -9,8 +10,10 @@ read-only, numbered version and atomically switches ``current`` to it::
     <state>/specs/
         current -> versions/7          (relative symlink, switched atomically)
         versions/7/                    (folders 0755; files 0444, re-checked by hash on every read)
-        versions/7/manifest.json       (number, time, note, data bundle, file hashes)
-        versions/7/dashboards/<slug>.yaml
+        versions/7/manifest.json       (number, time, note, data bundle, file hashes; per dashboard
+                                        where it came from, what it replaces, its sections and sources)
+        versions/7/dashboards/<slug>.yaml  (the composed file the server reads)
+        versions/7/project/ui/...      (the project's own dashboard and section files, for restore)
         .publish.lock                  (one publish / rollback at a time)
 
 If anything fails nothing is switched and the error names the file and the
@@ -1542,7 +1545,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
         "publish",
         help="Publish the dashboards so the server shows them.",
-        description="Check every dashboard in ui/dashboards/ against the current data and, when all are valid, "
+        description="Check every dashboard of the project and its apps against the current data and, when all are "
+        "valid, "
         "store them as a new numbered version that the server shows. Nothing changes if anything is wrong.",
     )
     p.add_argument("--note", help=f"a short note saved with the version (up to {MAX_NOTE_LENGTH} characters)")

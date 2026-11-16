@@ -1,10 +1,12 @@
 # my-easy-ui
 
 > **Rework in progress.** Fully flexible styles (a theme file plus real CSS) are built: see
-> [docs/STYLES.md](docs/STYLES.md). Apps as proper packages that contribute dashboards and panels
-> to a project ([design](https://github.com/josep-reyero/my-easy-software/blob/main/docs/apps.md))
-> are still being built. Until this note is removed, expect file formats and some commands to
-> change.
+> [docs/STYLES.md](docs/STYLES.md). Apps as proper packages that contribute dashboards, sections
+> and styles to a project ([design](https://github.com/josep-reyero/my-easy-software/blob/main/docs/apps.md))
+> are built on easy-ui's side (they follow the apps contract in my-easy-software's
+> `docs/apps-contract.md`); the my-easy-software side (`mes apps sync`, which writes
+> `apps.lock.json`, and `mes db sync`, which makes the shared database) is still being built.
+> Until this note is removed, expect file formats and some commands to change.
 
 A small dashboard server and browser renderer for projects built with [my-easy-software](https://github.com/josep-reyero/my-easy-software). One
 server process serves one project.
@@ -46,13 +48,17 @@ allowed, the closest match), and the server re-checks everything before it shows
 ## Try the demo
 
 ```sh
-easy-ui demo ./easy-ui-demo        # a small project with made-up data
+easy-ui demo ./easy-ui-demo        # a small project with two apps and made-up data
 cd ./easy-ui-demo/app
+easy-ui dashboards                 # where each dashboard and section comes from
 easy-ui preview                    # prints a link; open it in a browser on this computer
 ```
 
-The preview shows the dashboards straight from `ui/dashboards/`, with no password and nothing
-published. Edit a dashboard file and save it: the open page shows the change within a couple of
+The demo project has two tiny apps in `apps/`: `demo_moves` adds a "Distance by kind" section to
+the project's overview (after the row the overview marks `- anchor: movement`), and `demo_sleep`
+adds a sleep section at its end, with a stylesheet of its own that only touches that section.
+The preview shows the dashboards straight from the project's and the apps' files, with no
+password and nothing published. Edit a dashboard file and save it: the open page shows the change within a couple of
 seconds, or lists what to fix. `easy-ui demo` also prints the commands for the whole journey
 below with the demo's own folders.
 
@@ -65,23 +71,44 @@ In a project folder (the one holding `project.toml`, shared with [my-easy-softwa
 [project]
 name = "fitness"                 # lowercase letters, digits and -; at most 24 characters for a server
 title = "My fitness"
+apps = ["fitness_garmin"]        # the project's apps, by package name, in order
+
+[tables.days]                    # a shared table: several apps may write it (my-easy-software's part)
+key = ["date"]
+columns = { date = "text", steps = "integer" }
 
 [ui]
-data = "fitness.sqlite"          # the project's SQLite file, inside its data folder
-tables = ["days", "activities"]  # only these reach dashboards
 accent = "#2f6fdf"               # optional
 dashboards = ["overview"]        # optional: menu order; the first is the landing page
-refresh_after = ["sync"]         # optional, read by mes: jobs after which it runs easy-ui data build
+refresh_after = ["fitness-garmin.sync"]  # optional, read by mes: jobs after which it runs easy-ui data build
+# tables = ["days"]              # optional: fewer tables for the dashboards than the default
 ```
 
-`easy-ui` reads only `[project]` and `[ui]`; the other tables (`[apps]`, `[jobs]`, `[storage]`)
-belong to [my-easy-software](https://github.com/josep-reyero/my-easy-software). An old `app.toml` gets a message saying how to rename it.
+`easy-ui` reads `[project]`, `[ui]` and the names of `[tables]` and `[views]`; the rest belongs
+to [my-easy-software](https://github.com/josep-reyero/my-easy-software). The data is the
+project's shared database, `<data folder>/<project>.sqlite`. Dashboards read the shared tables
+(through their merged views), the `[views]` and each app's `[ui] tables`, and nothing else.
+Older forms (`[apps.*]`, `[jobs.*]`, `[ui] data`, a root `app.toml`) get a message saying what
+to change.
+
+Each app is a folder with an `app.toml` (in the project's `apps/<package>/`, or installed
+elsewhere and found through `apps.lock.json`, which `mes apps sync` writes). An app's
+`[ui] dashboards` are files in its `dashboards/` folder; `[ui.contributes.<dashboard>]` names a
+sections file whose sections easy-ui places in another dashboard (at its start, its end, or after
+one of its anchors); its `styles/`, `assets/` and `themes/` folders work like the project's, and
+its stylesheets apply only to what it contributes. The project has the last word:
+`ui/dashboards/<name>.yaml` replaces an app's dashboard of that name, and
+`ui/sections/<app>.<dashboard>.yaml` replaces (or, with `sections: []`, removes) an app's
+sections. `easy-ui dashboards` shows where each piece comes from and what overrides what.
+easy-ui reads an app's files only inside its folder, never through a link, and never more than
+a set size.
 
 ```sh
 easy-ui data build        # copy the allowed tables for the dashboards
 easy-ui tables            # see the tables and columns, with sample values (--source: the project's file)
 easy-ui components        # the whole vocabulary (add --json for agents)
 # write ui/dashboards/overview.yaml (see docs/SPEC.md)
+easy-ui dashboards        # the dashboards and sections from the project and its apps
 easy-ui validate          # check every dashboard against the data
 easy-ui preview           # look at it (one-time link, no password, nothing published)
 easy-ui publish           # make it the version the server shows
@@ -92,7 +119,9 @@ easy-ui serve             # http://127.0.0.1:8765, until you stop it with Ctrl-C
 
 `easy-ui rollback` shows the previous published version again; your files in `ui/dashboards/`
 stay as they are (the command says so), and `easy-ui rollback N --restore-files` puts version N's
-files back so you can edit from there.
+files back so you can edit from there. A version keeps the composed dashboards (with each app's
+sections in place), which file and app each piece came from, and the project's own files;
+`--restore-files` puts back only the project's own files (an app's files are the app's).
 
 **Passkeys.** After the first sign-in with the password, the page offers to add a passkey
 (**Sign-in** in the header: add, name and remove passkeys, switch password sign-in off, make
@@ -249,8 +278,8 @@ be installed outside `/var/lib/mes` and outside home folders (for example `/usr/
 
 v1. Everything above works: the dashboard format and its checks, the data copy, the query
 sandbox, publishing with versions and rollback, the server with passkeys, password and recovery
-codes, the browser page, themes and project stylesheets, the preview, static exports, pictures
-and the systemd files. Known
+codes, the browser page, themes and project stylesheets, the preview, static exports, pictures, the systemd files, and
+dashboards, sections and looks contributed by a project's apps. Known
 limits: formatting is English-style only (`1,234.5`, `14 Mar 2026`); charts space points evenly
 (one per row), which suits daily and weekly series; a browser that has never signed in can be
 kept from signing in *with the password* by someone on the private network who keeps sending

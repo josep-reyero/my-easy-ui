@@ -716,8 +716,9 @@ def _listing(comp: Composition) -> list[str]:
     if comp.apps:
         lines.append("Apps, in the order of [project] apps:")
         for a in comp.apps:
-            lines.append(f"  {a.name} ({a.label}): {len(a.dashboards)} dashboard(s), sections for "
-                         f"{', '.join(s for s, _ in a.contributes) or 'no dashboard'}")
+            own = ", ".join(a.dashboards) if a.dashboards else "none"
+            adds = ", ".join(s for s, _ in a.contributes) or "none"
+            lines.append(f"  {a.name} ({a.label}): its own dashboards: {own}; adds sections to: {adds}")
         lines.append("")
     lines.append("Dashboards, in menu order:")
     by_slug = {d.slug: d for d in comp.dashboards}

@@ -224,6 +224,36 @@ with a fixed full-screen box, push the dashboard over the top bar and change eve
 badge and the sign-out button stay visible, on top and clickable, and the sign-in settings look
 exactly as without it.
 
+## An app's own look
+
+Each of a project's apps may bring a look of its own, in its folder: `styles/*.css`,
+`assets/...` and ready-made `themes/*.yaml`. The same checks and limits apply as to the
+project's files, counted per app, and every problem names the app's file (for example
+`apps/fitness_sleep/styles/sleep.css`). An app's stylesheet may also not use `@scope`, `@page` or
+`@view-transition`.
+
+An app's stylesheet applies **only to what that app shows**: its own dashboards and the sections
+it adds to other dashboards. easy-ui marks those with `data-app="<app>"` (on the dashboard, on a
+row made only of the app's components, and on each component) and rewrites every selector of the
+app's stylesheet, also inside `@media`, `@supports`, `@layer` and `@container`:
+
+```css
+/* apps/fitness_sleep/styles/sleep.css */
+.eui-title { letter-spacing: 0.02em; }
+
+/* what the page receives */
+:where([data-app="fitness-sleep"]) .eui-title, .eui-title:where([data-app="fitness-sleep"]) { letter-spacing: 0.02em; }
+```
+
+`:where()` adds nothing to a selector's weight, and the apps' stylesheets load before the
+project's, so **the project's CSS always has the last word**. A project that replaces an app's
+dashboard with its own file (`ui/dashboards/<name>.yaml`) also drops that app's look from it.
+An app's `@font-face` rules are kept in `theme.css` before the project's; its fonts and pictures
+are served under `/ui/apps/<app>/assets/`, its stylesheets under `/ui/apps/<app>/styles/`, after
+sign-in only, like the project's. An app's themes are listed by `easy-ui themes` as
+`<app>/<name>` and copied into the project with `easy-ui theme use <app>/<name>`; they use the
+built-in fonts.
+
 ## Safety rules
 
 - **CSS cannot run code.** The page's policy is unchanged: `script-src 'self'`, no inline
@@ -232,7 +262,8 @@ exactly as without it.
   `element.style`.
 - **CSS cannot send data out.** The page's policy allows styles, pictures and fonts from its own
   address only, and easy-ui refuses before publishing any `url()`, `image-set()` or `@import` that
-  is not a relative path to a file in `ui/assets/` or `ui/styles/` (also when written with CSS
+  is not a relative path to a file in `ui/assets/` or `ui/styles/` (for an app: its own
+  `assets/` and `styles/`; also when written with CSS
   escapes such as `u\72l(`), plus `expression()`, `element()`, `src()`, `behavior:`,
   `-moz-binding`, `@namespace` and `@document`. Unknown at-rules, unclosed blocks, strings or
   comments, and control characters are errors too.
@@ -255,9 +286,12 @@ exactly as without it.
   `easy-ui rollback --restore-files` also copies them back into `ui/`; style files it would
   replace are first moved to `ui/.before-restore-<time>/`, and it refuses to write through a link.
 - An archive published with `publish.publish_from_archive` may carry `theme.yaml`,
-  `styles/*.css` and `assets/...` (optionally under `ui/`) beside the dashboard files.
-- `easy-ui preview` reloads when anything in `ui/theme.yaml`, `ui/styles/` or `ui/assets/`
-  changes; the page swaps in the new stylesheets without a blank moment.
+  `styles/*.css` and `assets/...` (optionally under `ui/`) beside the dashboard files, and an
+  app's look as `apps/<app>/styles/*.css` and `apps/<app>/assets/...`.
+- A version keeps each app's look with the project's; `rollback --restore-files` puts back only
+  the project's own files.
+- `easy-ui preview` reloads when anything in `ui/theme.yaml`, `ui/styles/` or `ui/assets/`,
+  or in an app's `styles/` or `assets/`, changes; the page swaps in the new stylesheets without a blank moment.
 - `easy-ui export` writes the look beside the page (`ui/theme.css`, `ui/styles/`, `ui/assets/`),
   so a shared copy looks the same. With `--encrypt` the numbers are locked but the look is not
   (the page's policy cannot load a stylesheet from locked data); the command says so.
@@ -268,8 +302,8 @@ exactly as without it.
 | Command | What it does |
 | --- | --- |
 | `easy-ui style-guide [--json]` | Every stable name, custom property and theme setting, with descriptions and an example. |
-| `easy-ui themes [--json]` | The ready-made themes (with `--json`, also the text of each). |
-| `easy-ui theme use NAME [--force]` | Copy a ready-made theme to `ui/theme.yaml`. Refuses (exit 5, `theme_exists`) to replace one without `--force`. |
+| `easy-ui themes [--json]` | The ready-made themes, and those the project's apps ship as `<app>/<name>` (with `--json`, also the text of each). |
+| `easy-ui theme use NAME [--force]` | Copy a ready-made theme (or an app's, `<app>/<name>`) to `ui/theme.yaml`. Refuses (exit 5, `theme_exists`) to replace one without `--force`. |
 | `easy-ui validate` | Checks the dashboards and the look; `--json` adds a `styles` part with `ok`, `errors`, `warnings` and `files`. |
 
 ## For developers

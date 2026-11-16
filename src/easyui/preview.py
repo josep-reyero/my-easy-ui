@@ -10,7 +10,8 @@ What it does:
    (``<project>.sqlite``) wins, else the first by name. Only the tables
    dashboards may read are copied,
    exactly as ``easy-ui data build`` does.
-2. Serves the dashboards straight from the working folder ``ui/dashboards/``
+2. Serves the dashboards straight from the working files (the project's ``ui/dashboards/`` and
+   ``ui/sections/`` and its apps' files, composed by ``easyui.compose``)
    on ``127.0.0.1`` only (it answers only to ``127.0.0.1:PORT`` and ``localhost:PORT``,
    with exactly the port it listens on), with a one-time link in place of a password. Each
    link signs in one browser; then a new link is printed (on stderr) for the
@@ -381,8 +382,9 @@ class WorkingSource:
             if r is None:
                 if slug == PROBLEMS_SLUG and self._needs_problem_page():
                     return self._problems_page()
-                raise NotFound(f'There is no dashboard called "{str(slug)[:60]}" in ui/dashboards/.',
-                               hint="Check the file name: ui/dashboards/<name>.yaml is the page <name>.")
+                raise NotFound(f'There is no dashboard called "{str(slug)[:60]}" in this project or its apps.',
+                               hint="Check the file name: ui/dashboards/<name>.yaml is the page <name>; "
+                               "easy-ui dashboards lists them all.")
             if not r["ok"]:
                 return problem_page(slug, r["title"], r["file"], r["errors"], r["warnings"])
             return spec.compile_dashboard(r["dashboard"], today=today)
@@ -392,8 +394,9 @@ class WorkingSource:
             self._ready()
             r = self._entries.get(slug) if isinstance(slug, str) else None
             if r is None:
-                raise NotFound(f'There is no dashboard called "{str(slug)[:60]}" in ui/dashboards/.',
-                               hint="Check the file name: ui/dashboards/<name>.yaml is the page <name>.")
+                raise NotFound(f'There is no dashboard called "{str(slug)[:60]}" in this project or its apps.',
+                               hint="Check the file name: ui/dashboards/<name>.yaml is the page <name>; "
+                               "easy-ui dashboards lists them all.")
             if not r["ok"]:
                 raise SpecError(f"{r['file']} has mistakes, so its queries do not run.",
                                 hint="Fix the file; the page lists what is wrong.", problems=r["errors"])
@@ -595,7 +598,7 @@ def _cmd_preview(args: argparse.Namespace) -> Any:
             print_now(
                 {"url": url, "app": cfg.name, "data": pv.data},
                 f"Preview of {cfg.title}: open {url}\n"
-                f"It shows ui/dashboards/ as you edit (using {pv.data['from']}: {pv.data['file']}); an open page "
+                f"It shows the dashboards of ui/dashboards/ and the apps as you edit (using {pv.data['from']}: {pv.data['file']}); an open page "
                 "shows a saved change within a couple of seconds. The link works once; after it is used, a new "
                 "one for another browser is shown here. Only this computer can open it. Stop with Ctrl-C.",
                 args.json,
@@ -625,7 +628,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
         "preview",
         help="Preview the dashboards on this computer before publishing.",
-        description="Serve ui/dashboards/ straight from the working folder on 127.0.0.1 with throwaway data, a "
+        description="Serve the dashboards of the project and its apps straight from their files on 127.0.0.1 with throwaway data, a "
         "one-time link instead of a password, and automatic reload when a file changes. Sample data is read from "
         "ui/fixtures/*.sqlite, *.sqlite3 or *.db when the project has no data yet (or with --fixture).",
     )
