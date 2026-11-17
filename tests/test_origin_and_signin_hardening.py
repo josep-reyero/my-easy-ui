@@ -9,6 +9,8 @@
 5. A session made with the password or a recovery code could change the sign-in settings without a passkey;
    the backup-eligible flag was not compared; clientDataJSON could name a field twice.
 6. The sign-in folder lived inside ui/, which the project's account writes; files under ui/ were read through links.
+7. Adding a passkey needed no passkey confirmation, so a password or recovery-code session could add its own
+   passkey, sign in with it and then change everything without confirming.
 """
 
 from __future__ import annotations
@@ -586,3 +588,138 @@ def test_open_nofollow_rules(tmp_path):
     with pytest.raises(OSError):
         paths.read_nofollow(tmp_path / "link" / "b" / "f", 3, 10)
     assert stat.S_ISLNK(paths.lstat_nofollow(tmp_path / "link", 1).st_mode)
+
+
+# ---------------------------------------------------------------- 7. adding a passkey needs the same confirmation
+# The attack: someone with only the password (or one recovery code) signed in, added their own passkey with no
+# confirmation, signed in with it, and then removed the owner's passkeys, turned the password off and made new
+# recovery codes, because a passkey session needs no confirmation.
+
+
+def _add(c, a, confirm=None, name="Mine"):
+    opts = post(c, "/api/passkeys/options", {"purpose": "register"})
+    assert opts.status_code == 200, opts.text
+    body = {"credential": a.register(opts.json(), origin_of(c)), "name": name}
+    if confirm is not None:
+        body["confirm"] = confirm
+    return post(c, "/api/passkeys/register", body)
+
+
+def _signed_in(env, owner, how):
+    """A fresh browser signed in with the password or a recovery code, while the owner's passkey exists."""
+    if how == "recovery":
+        setup = env.client()
+        assert passkey_login(setup, owner).status_code == 200
+        codes = post(setup, "/api/recovery-codes").json()["codes"]
+        c = env.client()
+        assert post(c, "/api/recovery", {"code": codes[0]}).status_code == 200
+        return c
+    c = env.client()
+    assert login_pw(c).status_code == 200
+    return c
+
+
+@pytest.mark.parametrize("how", ["password", "recovery"])
+def test_adding_a_passkey_to_password_or_recovery_session_needs_a_passkey_confirmation(env, owner, how):
+    c = _signed_in(env, owner, how)
+    store = passkeys.PasskeyStore(env.cfg.state.auth, env.clock)
+    intruder = SoftAuthenticator(ES256)
+    r = _add(c, intruder)
+    assert r.status_code == 403 and r.json()["error"]["code"] == "confirm_with_passkey"
+    assert "easy-ui passkeys remove" in r.json()["error"]["hint"]
+    assert "add a new passkey first" not in json.dumps(r.json())
+    assert store.count() == 1
+    # The intruder's own passkey cannot confirm (it is not saved), nor can an answer to a login challenge.
+    opts = post(c, "/api/passkeys/options", {"purpose": "confirm"}).json()
+    r = _add(c, intruder, confirm=intruder.login(opts, LOCAL))
+    assert r.status_code == 403 and r.json()["error"]["code"] == "unknown_passkey"
+    login_opts = post(c, "/api/passkeys/options", {"purpose": "login"}).json()
+    r = _add(c, intruder, confirm=owner.login(login_opts, LOCAL))
+    assert r.status_code == 400 and store.count() == 1
+    # A fresh confirmation by the owner's existing passkey: added.
+    r = _add(c, SoftAuthenticator(ES256), confirm=confirm_answer(c, owner))
+    assert r.status_code == 200, r.text
+    assert r.json()["added"]["name"] == "Mine" and store.count() == 2
+
+
+def test_the_first_passkey_needs_only_a_recent_sign_in(env):
+    c = env.client()
+    assert login_pw(c).status_code == 200
+    assert c.get("/api/signin").json()["confirm_needed"] is False
+    r = _add(c, SoftAuthenticator(ES256))
+    assert r.status_code == 200, r.text
+    env.clock.t += passkeys.RECENT_SIGN_IN + 1
+    r = post(c, "/api/passkeys/options", {"purpose": "register"})
+    assert r.status_code == 403 and r.json()["error"]["code"] == "sign_in_again"
+
+
+def test_a_passkey_session_adds_a_passkey_without_confirmation(env, owner):
+    c = env.client()
+    assert passkey_login(c, owner).status_code == 200
+    assert _add(c, SoftAuthenticator(ES256)).status_code == 200
+
+
+def test_a_passkey_added_in_this_session_cannot_confirm_this_session(env):
+    """The first passkey, added after a password sign-in, cannot then confirm changes for that same session."""
+    c = env.client()
+    assert login_pw(c).status_code == 200
+    first = SoftAuthenticator(ES256)
+    assert _add(c, first).status_code == 200
+    s = c.get("/api/signin").json()
+    assert s["confirm_needed"] is True and s["confirm_possible"] is False
+    r = post(c, "/api/passkeys/options", {"purpose": "confirm"})
+    assert r.status_code == 403 and r.json()["error"]["code"] == "sign_in_with_new_passkey"
+    assert _add(c, SoftAuthenticator(ES256)).json()["error"]["code"] == "confirm_with_passkey"
+    # With an older passkey saved too, a confirm challenge is issued (listing only the older one); an answer
+    # by the passkey added in this session is still refused.
+    older = SoftAuthenticator(ES256)
+    other = env.client()
+    assert passkey_login(other, first).status_code == 200 and _add(other, older).status_code == 200
+    opts = post(c, "/api/passkeys/options", {"purpose": "confirm"}).json()
+    assert [x["id"] for x in opts["publicKey"]["allowCredentials"]] == [b64url_encode(older.credential_id)]
+    for path, body in (("/api/signin/password", {"on": False}), ("/api/recovery-codes", {}),
+                       ("/api/passkeys/remove", {"id": b64url_encode(older.credential_id)}), ("add", None)):
+        answer = confirm_answer(c, first)
+        r = _add(c, SoftAuthenticator(ES256), confirm=answer) if path == "add" else post(c, path, {**body, "confirm": answer})
+        assert r.status_code == 403 and r.json()["error"]["code"] == "sign_in_with_new_passkey", path
+    assert passkeys.PasskeyStore(env.cfg.state.auth, env.clock).count() == 2
+    assert post(c, "/api/recovery-codes", {"confirm": confirm_answer(c, older)}).status_code == 200
+    # Signed in with it, it works as any passkey does; in another password session it can confirm.
+    c2 = env.client()
+    assert passkey_login(c2, first).status_code == 200
+    assert post(c2, "/api/signin/password", {"on": False}).status_code == 200
+    assert post(c2, "/api/signin/password", {"on": True}).status_code == 200
+    c3 = env.client()
+    assert login_pw(c3).status_code == 200
+    assert c3.get("/api/signin").json()["confirm_possible"] is True
+    assert _add(c3, SoftAuthenticator(ES256), confirm=confirm_answer(c3, first)).status_code == 200
+
+
+def test_the_first_passkey_check_is_repeated_when_it_is_saved(tmp_path):
+    """Two first passkeys added at once: the one saved second must have been confirmed."""
+    store = passkeys.PasskeyStore(tmp_path / "auth", Clock())
+    a, b = SoftAuthenticator(ES256), SoftAuthenticator(ES256)
+
+    def reg(x):
+        opts = {"publicKey": {"challenge": b64url_encode(b"c" * 40), "rp": {"id": "localhost"}, "user": {"id": b64url_encode(b"u" * 16)}}}
+        return webauthn.verify_registration(x.register(opts, LOCAL), challenge=b"c" * 40, origins=frozenset({LOCAL}), rp_id="localhost")
+
+    store.add(reg(a), rp_id="localhost", name=None, only_if_first=True)
+    with pytest.raises(Refused) as e:
+        store.add(reg(b), rp_id="localhost", name=None, only_if_first=True)
+    assert e.value.code == "confirm_with_passkey" and store.count() == 1
+    assert "added_in" not in json.dumps(store.listing())
+
+
+def test_the_settings_page_confirms_before_adding_a_passkey():
+    """The page asks for the confirmation when the server needs one, and sends it with the new passkey."""
+    from pathlib import Path
+
+    assets = Path(server.__file__).parent / "web" / "assets"
+    js = (assets / "settings.js").read_text(encoding="utf-8")
+    add = js[js.index("  addPasskey(name) {"):js.index("  removePasskey(p) {")]
+    assert add.index("await this.confirmation()") < add.index('passkeyOptions("register")')
+    assert "api.passkeyRegister(credential, name, confirm)" in add
+    assert "confirm_possible === false" in js[js.index("async confirmation()"):js.index("  addPasskey(name) {")]
+    api_js = (assets / "api.js").read_text(encoding="utf-8")
+    assert '"passkeys/register", confirm ? { credential, name, confirm } : { credential, name }' in api_js

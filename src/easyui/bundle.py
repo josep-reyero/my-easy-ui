@@ -18,8 +18,13 @@ The project's file is not trusted while it is copied: the connection to it is
 read-only, in SQLite's defensive mode, with untrusted schema (functions in its
 views must be harmless ones), no extension loading and no attached
 databases; an authorizer lets it only read, and only the listed tables and
-views (and what a listed view itself reads); and the copy stops after
-``BUILD_TIME_LIMIT_S`` (``DataBuildError``). The new file may grow to at most
+views (and what a listed view itself reads); SQLite's memory is capped as in the
+query sandbox (``sandbox.HEAP_LIMIT``, with ``temp_store = MEMORY``, so sorting
+never spills into files); and the copy stops after ``BUILD_TIME_LIMIT_S``
+(``DataBuildError``). This reading runs in the easy-ui process itself (not in a
+killable worker): the authorizer, the time limit and the memory cap are its limits.
+``describe_tables`` (``easy-ui tables``) reads the same way, with a time limit of
+``DESCRIBE_TIME_LIMIT_S`` (60 s) and the same memory cap. The new file may grow to at most
 ``2 x`` the project's file (at least ``MIN_SIZE_LIMIT``). Indexes are made
 again from their column lists (never by running the SQL stored in the
 project's file); indexes on expressions and partial indexes are left out.
@@ -151,13 +156,25 @@ def _harden(conn: sqlite3.Connection, *, defensive: bool = True) -> sqlite3.Conn
 
 
 def _connect_ro(db: Path, *, immutable: bool) -> sqlite3.Connection:
+    """A hardened read-only connection to a file easy-ui does not trust, in this process. Its memory is capped like
+    the query sandbox's (``sandbox.HEAP_LIMIT``, process-wide; it only ever lowers the cap) and its sorting and
+    temporary results stay in that memory (``temp_store = MEMORY``), never in files."""
+    from easyui.sandbox import ensure_heap_limit  # noqa: PLC0415
+
+    ensure_heap_limit()
     uri = "file:" + quote(str(db.resolve())) + "?mode=ro" + ("&immutable=1" if immutable else "")
     conn = sqlite3.connect(uri, uri=True, isolation_level=None)
     try:
-        return _harden(conn)
+        _harden(conn)
+        conn.execute("PRAGMA temp_store = MEMORY")
+        return conn
     except BaseException:
         conn.close()
         raise
+
+
+def _out_of_memory(e: BaseException) -> bool:
+    return isinstance(e, MemoryError) or "out of memory" in str(e).lower()
 
 
 class _SourceGuard:
@@ -395,7 +412,13 @@ def describe_tables(
                 entry["samples_hidden"] = True
             out.append(entry)
         return out
-    except sqlite3.OperationalError as e:
+    except (sqlite3.OperationalError, MemoryError) as e:
+        if _out_of_memory(e):
+            raise DataBuildError(
+                f"Looking at the data file needed more than {_heap_mb()} MB of memory, so it was stopped.",
+                hint="A view in the file may make very large values or sort a great many rows; list fewer tables, or "
+                "check the file with the project's own commands.",
+            ) from None
         if "interrupt" in str(e).lower():
             raise DataBuildError(
                 f"Looking at the data file took longer than {DESCRIBE_TIME_LIMIT_S:g} seconds, so it was stopped.",
@@ -625,7 +648,7 @@ def _build_locked(
             finally:
                 dst.close()
             src.execute("COMMIT")
-        except sqlite3.Error as e:
+        except (sqlite3.Error, MemoryError) as e:
             raise _copy_error(e, guard, cap_mb=max(MIN_SIZE_LIMIT, 2 * src_path.stat().st_size) // 1_000_000) from None
         finally:
             src.close()
@@ -684,7 +707,21 @@ def _build_locked(
     }
 
 
-def _copy_error(e: sqlite3.Error, guard: _SourceGuard, *, cap_mb: int) -> DataBuildError:
+def _heap_mb() -> int:
+    from easyui.sandbox import HEAP_LIMIT  # noqa: PLC0415
+
+    return HEAP_LIMIT // 1_000_000
+
+
+def _copy_error(e: sqlite3.Error | MemoryError, guard: _SourceGuard, *, cap_mb: int) -> DataBuildError:
+    if _out_of_memory(e):
+        return DataBuildError(
+            f"Copying the dashboard data needed more than {_heap_mb()} MB of memory, so it was stopped and nothing was "
+            "changed (the previous data stays in use).",
+            hint="A listed view may make very large values or sort a great many rows. Make it simpler, or list its "
+            "tables instead, then run: easy-ui data build",
+            detail=str(e) or "out of memory",
+        )
     msg = str(e).lower()
     if guard.refused or "not authorized" in msg or "prohibited" in msg or "unsafe use" in msg:
         what = guard.refused[0] if guard.refused else "something that is not plain reading"

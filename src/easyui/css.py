@@ -85,12 +85,15 @@ REFUSED_PROPERTIES = {
 URL_STRING_FUNCTIONS = ("image-set", "-webkit-image-set", "image", "cross-fade", "-webkit-cross-fade")
 # Fonts easy-ui's own screens (sign-in, settings, the preview badge) are drawn with; a project's
 # @font-face may not take these names, so it can never change how those screens look.
+# Every font family easy-ui's own screens name (web/assets/style.css; a test keeps the two in step), the generic
+# families and the CSS-wide keywords: a project @font-face may not take any of these names.
 RESERVED_FONT_NAMES = frozenset(n.lower() for n in (
     "system-ui", "-apple-system", "blinkmacsystemfont", "segoe ui", "roboto", "helvetica neue", "helvetica",
     "noto sans", "liberation sans", "arial", "iowan old style", "palatino linotype", "palatino",
     "urw palladio l", "p052", "book antiqua", "georgia", "sans-serif", "serif", "monospace", "cursive",
     "fantasy", "ui-sans-serif", "ui-serif", "ui-monospace", "ui-rounded", "menlo", "consolas",
     "courier new", "courier", "times new roman", "times", "sf pro", "sf pro text", "sf pro display",
+    "sf mono", "liberation mono",
     "inherit", "initial", "unset", "default",
 ))
 FONT_FAMILY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9 _-]{0,47}\Z")

@@ -414,3 +414,55 @@ def test_make_demo_app_is_reusable(tmp_path):
     assert app.config().tables == ("days", "activities", "weekly", "sleep_nights")
     assert [a.name for a in app.config().apps] == ["other-app-moves", "other-app-sleep"]
     assert [a.short for a in app.config().apps] == ["moves", "sleep"]
+
+
+# ---------------------------------------------------------------- reading the project's file is memory-capped
+# Finding: data build and tables --source read the project's file in the main process with an authorizer,
+# defensive mode and a time limit, but no memory cap, so one view could make the process grow without bound.
+
+_HOG = ("CREATE VIEW weekly AS SELECT length(group_concat(printf('%.1000c', 'x'))) AS n FROM "
+        "(WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < 150000) SELECT i FROM c)")
+
+
+def _memory_hog(app):
+    conn = sqlite3.connect(app.db_path)
+    conn.execute("DROP VIEW weekly")
+    conn.execute(_HOG)  # about 150 MB of text in one value, far over the 64 MB cap
+    conn.commit()
+    conn.close()
+
+
+@pytest.fixture
+def no_heap_cap():
+    """Start with no SQLite memory cap in this process (another test may have set one), and put it back after."""
+    from easyui import sandbox
+
+    previous = sandbox.set_heap_limit(0)
+    yield sandbox
+    sandbox.set_heap_limit(previous)
+
+
+def test_reading_the_project_file_for_a_build_is_memory_capped(demo_app, no_heap_cap):
+    _memory_hog(demo_app)
+    with pytest.raises(DataBuildError) as e:
+        demo_app.build()
+    assert "memory" in e.value.message and "previous data stays in use" in e.value.message
+    assert no_heap_cap.set_heap_limit(0) == no_heap_cap.HEAP_LIMIT
+    st = demo_app.config().state
+    assert bundle.current_bundle(st) is None and not [p for p in st.data.iterdir() if p.name.startswith(bundle._TMP_PREFIX)]
+
+
+def test_describing_the_project_file_is_memory_capped(demo_app, no_heap_cap):
+    _memory_hog(demo_app)
+    with pytest.raises(DataBuildError) as e:
+        bundle.describe_tables(demo_app.db_path, samples=1, immutable=False)
+    assert "memory" in e.value.message
+    assert no_heap_cap.set_heap_limit(0) == no_heap_cap.HEAP_LIMIT
+
+
+def test_the_project_file_is_read_with_temporary_data_in_memory(demo_app):
+    conn = bundle._connect_ro(demo_app.db_path, immutable=False)
+    try:
+        assert conn.execute("PRAGMA temp_store").fetchone()[0] == 2  # MEMORY: under the cap, never in files
+    finally:
+        conn.close()

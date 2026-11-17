@@ -120,12 +120,22 @@ sections in place), which file and app each piece came from, and the project's o
 recovery codes). Passkeys work on `http://localhost:PORT` and over HTTPS (for example behind the
 private network's proxy); on other plain-http addresses the page uses the password. Signing in
 with a passkey is never slowed down by someone guessing passwords. Removing a passkey, switching
-password sign-in on or off and making new recovery codes sign out every other browser; when the
-page signed in with the password or a recovery code and a passkey exists, these changes are also
-confirmed with a passkey first. From the server's terminal:
+password sign-in on or off and making new recovery codes sign out every other browser. When the
+page signed in with the password or a recovery code and a passkey exists, these changes and
+adding a passkey are first confirmed with one of the saved passkeys (one added since that
+sign-in does not count: sign in with it instead). Only the very first passkey is added with just
+the password. So someone who learns the password or one recovery code cannot add a passkey of
+their own and take over. From the server's terminal:
 `easy-ui passkeys` (list), `easy-ui passkeys remove NAME`, `easy-ui sign-in` (status),
 `easy-ui sign-in password on|off`, `easy-ui recovery-codes` (ten one-time codes, shown once on
 the terminal only).
+
+**Lost every passkey?** The password or a recovery code still signs you in, but the web page
+cannot add a new passkey or change anything else, because nothing is left to confirm with. Fix
+it on the server, as the account that runs the dashboards: list the passkeys with
+`easy-ui passkeys`, remove each lost one with `easy-ui passkeys remove NAME` (removing the last
+one turns password sign-in back on and signs out every browser), then sign in with the password
+and add a new passkey, which is a first passkey again. Make new recovery codes then too.
 
 **Passwords and agents.** Only a person can set the sign-in password: `easy-ui set-password`
 reads it from the terminal, never from an argument, a variable or a pipe, and answers an agent

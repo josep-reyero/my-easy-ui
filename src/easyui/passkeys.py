@@ -12,7 +12,8 @@ Files (all in ``<ui>/auth/``, mode 0600, written atomically under the auth lock)
   ``rp_id`` (the RP ID it was made for, kept for good: it is checked at every sign-in and
   must be one the server is configured for), ``name``, ``created``, ``last_used``,
   ``backup_eligible`` (checked at every sign-in: it never changes for a passkey), ``backed_up``,
-  ``aaguid``, ``transports``. Public keys are not
+  ``aaguid``, ``transports``, and ``added_in`` when it was added on the web page (a hash of the
+  session it was added in: that passkey cannot confirm changes for that same session). Public keys are not
   secret; nothing in this file lets anyone sign in.
 - ``recovery.json``: ``{"v": 1, "salt", "created", "codes": [{"hash", "used"}]}``. Only
   salted SHA-256 hashes are stored; the codes are shown once, when they are made.
@@ -21,6 +22,10 @@ Rules
 -----
 - At most ``MAX_PASSKEYS`` (20) passkeys. Several per owner; each can be named,
   listed and removed (from the command line or the sign-in settings page).
+- Once a passkey exists, a session made with the password or a recovery code confirms every
+  change (adding a passkey too) with a saved passkey that was not added in that session; the
+  first passkey needs only a recent sign-in, checked again under the lock when it is saved
+  (``only_if_first``). Lost every passkey: remove them on the server (``easy-ui passkeys remove``).
 - Password sign-in can be turned off only while at least one passkey exists.
   Removing the last passkey turns it back on (when a password is set), so the
   owner is never left without a way in by accident.
@@ -49,7 +54,8 @@ Public API
 ``MAX_PASSKEYS``, ``RECOVERY_CODES``, ``CHALLENGE_SECONDS``, ``RECENT_SIGN_IN``
 ``PasskeyStore(auth_dir, clock=time.time)``
     ``user_id()``, ``credentials() -> dict``, ``listing() -> list[dict]`` (no keys), ``count()``,
-    ``get(credential_id_b64) -> dict | None``, ``add(registration, *, rp_id, name) -> dict``,
+    ``get(credential_id_b64) -> dict | None``,
+    ``add(registration, *, rp_id, name, added_in=None, only_if_first=False) -> dict``,
     ``touch(credential_id_b64, sign_count, backed_up)`` (raises when the passkey is gone or its counter did not
     go up), ``remove(id_or_name) -> dict`` (the removed one),
     ``password_sign_in() -> bool``, ``set_password_sign_in(on, *, password_set) -> bool``.
@@ -59,6 +65,7 @@ Public API
 ``Challenges(clock=time.time)``      purposes: ``login``, ``register``, ``confirm``.
     ``issue(purpose, binding) -> bytes``, ``check(challenge, purpose, binding)`` (raises),
     ``accept(challenge)`` (raises when it was already used; call after the answer verified).
+``added_in(session_key) -> str``     the mark ``add`` keeps of the session a passkey was added in.
 ``default_name(listing, now) -> str``
 ``clean_name(text) -> str``
 """
@@ -118,6 +125,11 @@ def default_name(listing: list[dict[str, Any]], now: float) -> str:
 
 
 # ---------------------------------------------------------------- passkeys
+
+
+def added_in(session_key: str) -> str:
+    """The mark a passkey keeps of the session it was added in (a hash of the session's stored hash: not a secret)."""
+    return hashlib.sha256(b"easyui passkey added in\0" + session_key.encode()).hexdigest()[:32]
 
 
 class PasskeyStore:
@@ -184,12 +196,23 @@ class PasskeyStore:
         items.sort(key=lambda p: (p["created"] or 0, p["id"]))
         return items
 
-    def add(self, reg: Registration, *, rp_id: str, name: str | None) -> dict[str, Any]:
+    def add(
+        self, reg: Registration, *, rp_id: str, name: str | None, added_in: str | None = None, only_if_first: bool = False
+    ) -> dict[str, Any]:
+        """Save a new passkey. ``added_in`` marks the session it was added in (see ``added_in(session_key)``);
+        ``only_if_first`` refuses it when another passkey was saved in the meantime (it was not confirmed)."""
         cid = b64url_encode(reg.credential_id)
         now = self.clock()
         with locked(self.lock_path):
             data = self._read()
             creds = data["credentials"]
+            if only_if_first and creds:
+                raise Refused(
+                    "Another passkey was added a moment ago, so this one must be confirmed with a passkey that was "
+                    "already saved, and it was not added.",
+                    hint="Reload the page and add it again; confirm with your other passkey when the page asks.",
+                    code="confirm_with_passkey",
+                )
             if cid in creds:
                 raise Refused(
                     "This passkey is already saved, so it was not added again.",
@@ -218,6 +241,8 @@ class PasskeyStore:
                 "aaguid": reg.aaguid,
                 "transports": list(reg.transports),
             }
+            if added_in:
+                creds[cid]["added_in"] = added_in
             data.setdefault("password_sign_in", True)
             self._write(data)
         return next(p for p in self.listing() if p["id"] == cid)

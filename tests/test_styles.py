@@ -631,3 +631,44 @@ def test_validate_covers_the_look(built_app):
     assert any(w.get("did_you_mean") == "eui-title" for w in data["styles"]["warnings"])
     code, out, _ = run_cli("validate")
     assert code != 0 and "ui/styles/a.css" in out
+
+
+# ---------------------------------------------------------------- easy-ui's own font names stay reserved
+
+
+def _own_font_families() -> set[str]:
+    """Every font family easy-ui's own stylesheet names (font-family and the font custom properties)."""
+    text = (Path(css.__file__).parent / "web" / "assets" / "style.css").read_text(encoding="utf-8")
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    families: set[str] = set()
+    keywords = {"inherit", "initial", "unset", "revert", "revert-layer"}
+    for prop, value in re.findall(r"(?<![\w-])(font-family|font|--[\w-]*font[\w-]*)\s*:\s*([^;{}]+)", text):
+        if re.search(r"-(size|weight|style|variant|feature|stretch)", prop):
+            continue
+        value = value.strip()
+        if prop == "font":
+            # The shorthand would name families after a size; easy-ui only uses keywords there.
+            assert value in keywords, f"style.css uses font: {value}; teach this test to read the families in it"
+            continue
+        for part in value.split(","):
+            name = part.strip().strip('"').strip("'").strip()
+            if name and not name.startswith("var(") and name not in keywords:
+                families.add(name)
+    return families
+
+
+def test_every_font_family_easy_ui_uses_is_reserved():
+    """Finding: "SF Mono" and "Liberation Mono" (the command boxes) were not reserved, so a project @font-face
+    could take their names and change how easy-ui's own screens look."""
+    families = _own_font_families()
+    assert {"SF Mono", "Liberation Mono", "Iowan Old Style", "system-ui"} <= families  # the parser finds them
+    missing = sorted(f for f in families if f.lower() not in css.RESERVED_FONT_NAMES)
+    assert not missing, f"font families in style.css that a project could take over: {missing}"
+
+
+@pytest.mark.parametrize("family", ["SF Mono", "Liberation Mono"])
+def test_a_project_font_cannot_take_the_command_box_fonts(family):
+    sheet = f'@font-face {{ font-family: "{family}"; src: url("../assets/fonts/x.woff2") format("woff2"); }}\n'
+    check = css.check_stylesheet(sheet, file="ui/styles/site.css", name="site", stylesheets=(), assets=("fonts/x.woff2",),
+                                 classes=(), properties=(), data_types=())
+    assert any("easy-ui's own screens use" in e["problem"] for e in check.errors), check.errors

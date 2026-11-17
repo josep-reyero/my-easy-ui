@@ -201,6 +201,19 @@ Rules (checked by `easy-ui validate` and again by the server for every request):
   5 MB); beyond that the result is cut and marked `truncated`. A query that is still running
   when its time is up is stopped (its worker process is killed), whatever it is doing.
 
+**Where SQL runs.** Every dashboard query runs in a worker process that is killed when its time
+is up: the queries the server runs for a page (`POST /api/query`), the checks of
+`easy-ui validate`, `easy-ui publish` and the preview, and the queries of `easy-ui export`. Two
+things read SQLite files in the easy-ui process itself, with no worker to kill:
+`easy-ui data build` (it reads the listed tables and views of the project's file and writes the
+new copy; the preview builds its data the same way) and `easy-ui tables` (with `--source` it reads the project's file). Their reading of the
+project's file runs read-only, in SQLite's defensive mode with untrusted schema, with the same
+64 MB SQLite memory cap the queries have (sorting and temporary results stay in that memory,
+never in files) and a time limit (10 minutes for a build, 60 seconds for `easy-ui tables`);
+the build's reading also has an authorizer that lets it read only the listed tables and views.
+A view that goes past one of these limits stops the command with a plain message, and a build
+that stops changes nothing. These commands are run by the project's own account, on its own file.
+
 `WITH RECURSIVE`, window functions, `json_each` / `json_tree` and SQLite's built-in functions all
 work. Name result columns the way they should appear on the page: `steps AS "Steps per day"`.
 That name is what charts show in their legend.

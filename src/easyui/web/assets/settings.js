@@ -2,12 +2,14 @@
 // remove), whether the password can still be used, and the recovery codes.
 // Changes are allowed only shortly after signing in; the server enforces that
 // and this page says so. When this page signed in with the password or a
-// recovery code and a passkey exists, removing a passkey, switching the
-// password and making new recovery codes are confirmed with a passkey first
-// (the server asks for it: confirm_needed).
+// recovery code and a passkey exists, adding a passkey, removing one,
+// switching the password and making new recovery codes are confirmed with a
+// saved passkey first (the server asks for it: confirm_needed). A passkey
+// added in that same sign-in cannot confirm it (confirm_possible is false
+// when no other passkey exists): the page then says to sign in with it.
 
 import { h, fill, icon, nextId } from "./dom.js";
-import { api, describe } from "./api.js";
+import { api, describe, ApiError } from "./api.js";
 import { passkeysSupported, createPasskey, getPasskey, passkeyProblem } from "./passkey.js";
 import { MONTHS } from "./format.js";
 
@@ -82,15 +84,25 @@ export class SignInSettings {
   /** A fresh passkey answer when the server needs one for this change, else undefined. */
   async confirmation() {
     if (!this.data || !this.data.confirm_needed) return undefined;
+    if (this.data.confirm_possible === false) {
+      throw new ApiError({
+        status: 403,
+        code: "sign_in_with_new_passkey",
+        message: "The passkey you just added cannot confirm changes for this sign-in, because this page signed in with the password or a recovery code.",
+        hint: "Sign out, sign in with your new passkey, and make the change then.",
+      });
+    }
     const options = await api.passkeyOptions("confirm");
     return getPasskey(options);
   }
 
   addPasskey(name) {
     return this.act(async () => {
+      // Once a passkey exists, a page signed in with the password or a recovery code confirms with it first.
+      const confirm = await this.confirmation();
       const options = await api.passkeyOptions("register");
       const credential = await createPasskey(options);
-      const out = await api.passkeyRegister(credential, name);
+      const out = await api.passkeyRegister(credential, name, confirm);
       this.offer = false;
       return out;
     }, (out) => `Added the passkey “${out.added.name}”. Next time, sign in with it.`);
@@ -147,7 +159,9 @@ export class SignInSettings {
       ]));
     }
     if (d.confirm_needed && !locked && !this.flash) {
-      parts.push(h("p", { class: "settings-p is-quiet", text: "This page signed in with the password or a recovery code, so changes here are confirmed with one of your passkeys first." }));
+      parts.push(h("p", { class: "settings-p is-quiet", text: d.confirm_possible === false
+        ? "This page signed in with the password or a recovery code, and the passkey you added since cannot confirm changes for this sign-in. To make more changes, sign out and sign in with that passkey."
+        : "This page signed in with the password or a recovery code, so changes here, adding a passkey too, are confirmed with one of your saved passkeys first. If you have lost all of them, they are removed on the server with easy-ui passkeys remove." }));
     }
     if (this.codes) parts.push(this.codesPanel());
     if (this.offer && !d.passkeys.length && d.passkeys_here && passkeysSupported()) parts.push(this.offerPanel());

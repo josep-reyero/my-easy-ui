@@ -71,7 +71,10 @@ password is switched off, only the passkey and the recovery code remain. After t
 password sign-in the page offers, once, to add a passkey. "Sign-in" in the header opens the
 settings: passkeys (name, when added, when last used, remove in two steps), the password switch,
 and recovery codes, shown once in a monospaced grid with Copy and "I have saved them". Changing
-any of these asks for a sign-in within the last ten minutes.
+any of these asks for a sign-in within the last ten minutes. When the page signed in with the
+password or a recovery code and a passkey is saved, every change, adding a passkey too, first asks
+the device for one of the saved passkeys; a passkey added since that sign-in cannot confirm it,
+and the page says to sign in with it instead.
 
 **Shared copy.** A copy made by `easy-ui export` says "Shared copy · 16 Nov 2026" where Sign out
 would be. Its controls are shown as plain values ("From 1 Jan 2026 · Group by Week") with a note

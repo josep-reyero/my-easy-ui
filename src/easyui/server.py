@@ -45,17 +45,22 @@ HTTP API (JSON; every route except session, login, logout, recovery, passkeys/op
                               otherwise) and are bound to the session.
 ``POST /api/passkeys/login``  ``{credential}`` -> signed in. Never throttled. Refused: ``unknown_passkey``,
                               ``other_address``, ``passkey_stale``, ``passkey_replayed``, ``passkey_refused``.
-``POST /api/passkeys/register`` ``{credential, name}`` -> the new passkey (recent sign-in).
+``POST /api/passkeys/register`` ``{credential, name, confirm?}`` -> the new passkey (recent sign-in).
 ``POST /api/passkeys/remove`` ``{id, confirm?}`` (recent sign-in); removing the last one turns the password
                               back on.
 ``GET /api/signin``           the sign-in settings: passkeys (id, name, created, last used), password
-                              on/off, recovery codes left, ``confirm_needed``.
+                              on/off, recovery codes left, ``confirm_needed``, ``confirm_possible``.
 ``POST /api/signin/password`` ``{on, confirm?}`` (recent sign-in; off only while a passkey exists).
 ``POST /api/recovery-codes``  ``{confirm?}`` -> ten new one-time codes, shown once (recent sign-in).
 Removing a passkey, switching password sign-in and making new recovery codes end every other
 session (the current one stays). When the current session was made with the password or a
-recovery code and a passkey exists, they also need ``confirm``: a fresh passkey answer to a
-``confirm`` challenge (``confirm_with_passkey`` otherwise).
+recovery code and a passkey exists, these and adding a passkey also need ``confirm``: a fresh
+answer to a ``confirm`` challenge by a saved passkey (``confirm_with_passkey`` otherwise). A
+passkey added in that same session cannot give it (``sign_in_with_new_passkey``;
+``confirm_possible`` is false when no other passkey exists); the very first passkey needs only a
+recent sign-in. So an owner who has lost every passkey cannot add one on the web page: they remove
+the lost ones on the server (``easy-ui passkeys remove``, as the account that runs the dashboards),
+which turns password sign-in back on with the last one, then sign in and add a new one.
 Passkeys work on ``http://localhost:PORT`` and over HTTPS. The RP ID and the origins a passkey
 answer may come from are the server's configured origins (``--origin``; see ``easyui.security``),
 never taken from the request; each saved passkey keeps the RP ID it was made with.
@@ -560,6 +565,22 @@ def _confirm_needed(st: ServerState, session: Session) -> bool:
     return session.how != "passkey" and passkeys.PasskeyStore(st.config.state.auth, st.clock).count() > 0
 
 
+def _confirm_possible(st: ServerState, session: Session) -> bool:
+    """Whether a passkey that was not added in this session exists (only such a passkey can confirm here)."""
+    mark = passkeys.added_in(session.key)
+    creds = passkeys.PasskeyStore(st.config.state.auth, st.clock).credentials()
+    return any(c.get("added_in") != mark for c in creds.values())
+
+
+# Said whenever the web page cannot make a sign-in change because no saved passkey can confirm it.
+_LOST_PASSKEYS_HINT = (
+    "If you no longer have any of your passkeys, this cannot be done on the web page: on the server, as the account "
+    "that runs the dashboards, list them with easy-ui passkeys and remove each lost one with "
+    "easy-ui passkeys remove NAME. When the last one is removed, password sign-in is on again, and you can sign "
+    "in with the password and add a new passkey."
+)
+
+
 def _settings(st: ServerState, request: Request, session: Session) -> dict[str, Any]:
     auth_dir = st.config.state.auth
     store = passkeys.PasskeyStore(auth_dir, st.clock)
@@ -576,6 +597,7 @@ def _settings(st: ServerState, request: Request, session: Session) -> dict[str, 
         "passkeys_here": passkeys_usable_here(request),
         "can_change_for": max(0, int(left)),
         "confirm_needed": _confirm_needed(st, session),
+        "confirm_possible": _confirm_possible(st, session),
     }
 
 
@@ -633,7 +655,16 @@ async def api_passkey_options(request: Request) -> Response:
         session = require_session(request)
         _require_recent(st, session)
         challenge = st.challenges.issue("confirm", session.key)
-        mine = [cid for cid, c in (await run_in_threadpool(store.credentials)).items() if c.get("rp_id") == rp_id]
+        here = [(cid, c) for cid, c in (await run_in_threadpool(store.credentials)).items() if c.get("rp_id") == rp_id]
+        mark = passkeys.added_in(session.key)
+        mine = [cid for cid, c in here if c.get("added_in") != mark]  # one added in this session cannot confirm it
+        if here and not mine:
+            raise NotAllowed(
+                "The passkeys for this address were added after this page signed in with the password or a recovery "
+                "code, so they cannot confirm changes for this same sign-in.",
+                hint="Sign out, sign in with your passkey, and make the change then.",
+                code="sign_in_with_new_passkey",
+            )
         if not mine:
             raise NotAllowed(
                 "None of the saved passkeys was made for this address, so it cannot confirm the change here.",
@@ -723,19 +754,30 @@ def _passkey_login(st: ServerState, request: Request, credential: Any) -> authmo
     )
 
 
-def _require_confirmation(st: ServerState, request: Request, session: Session, confirm: Any) -> None:
-    """For a session made with the password or a recovery code: a fresh answer from one of the passkeys."""
+def _require_confirmation(st: ServerState, request: Request, session: Session, confirm: Any) -> bool:
+    """For a session made with the password or a recovery code: a fresh answer from one of the saved passkeys,
+    one that was not added in this same session. Whether a confirmation was needed (and given)."""
     if not _confirm_needed(st, session):
-        return
+        return False
     if confirm is None:
         raise NotAllowed(
             "This page signed in with the password or a recovery code, so this change must be confirmed with one of "
-            "your passkeys first.",
-            hint="Confirm with your passkey when the page asks. If you have none at hand, add a new passkey first, "
-            "or make the change on the server with easy-ui passkeys, easy-ui sign-in or easy-ui recovery-codes.",
+            "your saved passkeys first.",
+            hint="Confirm with one of your passkeys when the page asks, or sign in with a passkey and make the "
+            "change then. " + _LOST_PASSKEYS_HINT,
             code="confirm_with_passkey",
         )
-    _verify_passkey(st, request, confirm, "confirm", session.key)
+    cid = _verify_passkey(st, request, confirm, "confirm", session.key)
+    saved = passkeys.PasskeyStore(st.config.state.auth, st.clock).get(cid) or {}
+    if saved.get("added_in") == passkeys.added_in(session.key):
+        raise NotAllowed(
+            "This passkey was added after this page signed in with the password or a recovery code, so it cannot "
+            "confirm changes for this same sign-in.",
+            hint="Sign out, sign in with this passkey, and make the change then. Or confirm with a passkey you "
+            "added before.",
+            code="sign_in_with_new_passkey",
+        )
+    return True
 
 
 async def api_passkey_login(request: Request) -> Response:
@@ -749,15 +791,26 @@ async def api_passkey_login(request: Request) -> Response:
     return resp
 
 
-def _passkey_register(st: ServerState, request: Request, session: Session, credential: Any, name: Any) -> dict[str, Any]:
+def _passkey_register(
+    st: ServerState, request: Request, session: Session, credential: Any, name: Any, confirm: Any = None
+) -> dict[str, Any]:
     _require_recent(st, session)
     rp_id, origins = passkey_site(request)
     challenge = _challenge_of(credential)
     st.challenges.check(challenge, "register", session.key)
+    # Adding a passkey is a sign-in change like the others: once a passkey exists, a session made with the
+    # password or a recovery code must confirm it with a saved passkey (else it could add its own passkey,
+    # sign in with it, and then change everything without confirming). The very first passkey needs only a
+    # recent sign-in; that it is still the first is checked again when it is saved.
+    confirmed = _require_confirmation(st, request, session, confirm)
     reg = webauthn.verify_registration(credential, challenge=challenge, origins=origins, rp_id=rp_id)
     st.challenges.accept(challenge)
     store = passkeys.PasskeyStore(st.config.state.auth, st.clock)
-    added = store.add(reg, rp_id=rp_id, name=name if isinstance(name, str) else None)
+    added = store.add(
+        reg, rp_id=rp_id, name=name if isinstance(name, str) else None,
+        added_in=passkeys.added_in(session.key) if session.how != "passkey" else None,
+        only_if_first=session.how != "passkey" and not confirmed,
+    )
     log.warning("a passkey was added (%s)", added["name"][:60])
     return {"added": {k: v for k, v in added.items() if k != "rp_id"}, **_settings(st, request, session)}
 
@@ -766,8 +819,10 @@ async def api_passkey_register(request: Request) -> Response:
     session = require_session(request)
     st = _state(request)
     _no_passkeys_in_preview(st)
-    body = await json_body(request, ("credential", "name"))
-    return JSONResponse(await run_in_threadpool(_passkey_register, st, request, session, body.get("credential"), body.get("name")))
+    body = await json_body(request, ("credential", "name", "confirm"))
+    return JSONResponse(await run_in_threadpool(
+        _passkey_register, st, request, session, body.get("credential"), body.get("name"), body.get("confirm")
+    ))
 
 
 def _passkey_remove(st: ServerState, request: Request, session: Session, cid: Any, confirm: Any) -> dict[str, Any]:
@@ -1988,7 +2043,10 @@ def register(subparsers: Any) -> None:
         "passkeys",
         help="List or remove the passkeys that can sign in.",
         description="List the passkeys that can sign in to this project's dashboards, or remove one. Passkeys are "
-        "added on the dashboards page (Sign-in settings), by someone who is signed in.",
+        "added on the dashboards page (Sign-in settings), by someone who is signed in; once one exists, adding "
+        "another from a password or recovery-code sign-in must be confirmed with a saved passkey. Lost every "
+        "passkey? Remove each one here; removing the last turns password sign-in back on, so you can sign in and "
+        "add a new one.",
     )
     pk_sub = p.add_subparsers(dest="passkeys_command", metavar="<list|remove>")
     p.set_defaults(func=_cmd_passkeys_list)
