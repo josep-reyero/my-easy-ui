@@ -1,0 +1,38 @@
+# Publishes this package to PyPI when a GitHub release is published.
+# It uses PyPI "trusted publishing": no password or token is stored anywhere. PyPI only accepts
+# the upload because it comes from this workflow, in this repository, in the "pypi" environment.
+name: publish
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write   # lets PyPI verify that this run is this repository's workflow
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: false
+      - name: Check the release tag matches the package version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="$(uv version --short)"
+          if [ "v$version" != "$TAG" ]; then
+            echo "The release tag is $TAG but pyproject.toml says version $version. They must match (tag v$version)." >&2
+            exit 1
+          fi
+      - name: Build
+        run: uv build
+      - name: Publish
+        run: uv publish --trusted-publishing always

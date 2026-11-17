@@ -13,6 +13,11 @@ dependencies = [
     "cryptography>=42",
 ]
 
+[project.urls]
+Homepage = "https://github.com/josep-reyero/my-easy-ui"
+Repository = "https://github.com/josep-reyero/my-easy-ui"
+Issues = "https://github.com/josep-reyero/my-easy-ui/issues"
+
 [project.scripts]
 easy-ui = "easyui.cli:main"
 
