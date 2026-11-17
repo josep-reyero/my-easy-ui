@@ -337,18 +337,18 @@ def test_appconfig_project_errors(tmp_path, text, words):
     "text, words, hint",
     [
         ('[project]\nname = "demo"\n\n[apps.demo]\ncommand = "demo"\n',
-         "still has the old [apps.demo] section", "Move the app into apps/<package>/ with an app.toml"),
+         'a setting "apps" at the top', 'The project lists its apps under [project]: apps = ["<package>"]'),
         ('[project]\nname = "demo"\napps = ["demo_main"]\n[jobs.sync]\nrun = "demo sync"\n',
-         "still has [jobs.sync]", "use [settings.<app>]"),
+         'a setting "jobs" at the top', "use [settings.<app>]"),
         ('[project]\nname = "demo"\napps = ["demo_main"]\n[ui]\ndata = "demo.sqlite"\n',
-         "every project has one shared database, demo.sqlite", "Remove the data line from [ui]."),
+         'a setting "data" under [ui]', "remove the data line"),
     ],
 )
-def test_old_project_forms_get_the_migration_messages(tmp_path, text, words, hint):
+def test_settings_that_belong_elsewhere_say_where(tmp_path, text, words, hint):
     write_toml(tmp_path, text)
     with pytest.raises(ConfigError) as e:
         appconfig.load(tmp_path)
-    assert words in e.value.message and hint in e.value.hint and e.value.code == "config_old_format"
+    assert words in e.value.message and hint in e.value.hint and e.value.code == "config_unknown_key"
 
 
 def test_appconfig_reads_only_names_of_tables_and_views(tmp_path):

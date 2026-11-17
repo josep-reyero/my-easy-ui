@@ -24,10 +24,9 @@ sections 1 and 6.5). It reads ``[project]`` (``name``, ``title``, ``version``,
     tables = ["activities", "weekly"]        # optional: narrows what dashboards may read
     refresh_after = ["fitlab-rides.rebuild"] # optional, read by mes: job ids
 
-Unknown keys are errors (with the closest correct name). The old forms
-(``[apps.<name>]``, ``[jobs.<name>]``, ``[ui] data``, a missing ``[project]
-apps``) are refused with a plain message saying what to change. The data the
-dashboards read is always the shared database ``<data folder>/<project>.sqlite``.
+Unknown keys are errors (with the closest correct name, and for settings that
+belong elsewhere, such as ``[jobs]`` or ``[ui] data``, where they go). The data
+the dashboards read is always the shared database ``<data folder>/<project>.sqlite``.
 
 The apps themselves (their ``app.toml`` files, found through ``apps.lock.json``
 or in ``<project>/apps/<package>/``) are read by ``easyui.project``; the
@@ -228,14 +227,28 @@ def _where(e: tomllib.TOMLDecodeError) -> str:
     return f" on line {m.group(1)}" if m else ""
 
 
+# Where a setting that does not belong in project.toml (at that place) goes instead.
+_ELSEWHERE = {
+    ("", "apps"): 'The project lists its apps under [project]: apps = ["<package>"]; each app is a package folder '
+                  "with its own app.toml (see: mes guide apps).",
+    ("", "jobs"): "Jobs belong in the app.toml of the app that runs them; to change a schedule from the project, use "
+                  "[settings.<app>].",
+    ("", "app"): "project.toml describes the project in a [project] table; an [app] table belongs in an app's own "
+                 "app.toml.",
+    ("ui", "data"): "Dashboards always read the project's shared database, <project>.sqlite in its data folder; "
+                    "remove the data line.",
+}
+
+
 def _unknown_key(table: str, key: str, allowed: tuple[str, ...]) -> ConfigError:
     close = difflib.get_close_matches(str(key), allowed, n=1)
     did = f' Did you mean "{close[0]}"?' if close else ""
     where = f"under [{table}]" if table else "at the top"
+    elsewhere = _ELSEWHERE.get((table, str(key)))
     return ConfigError(
         f'project.toml has a setting "{str(key)[:60]}" {where} that easy-ui does not know, so it cannot be sure '
-        f"what you meant.{did}",
-        hint=f"The settings allowed {where} are: {', '.join(allowed)}.",
+        f"what you meant.{'' if elsewhere else did}",
+        hint=(elsewhere + " " if elsewhere else "") + f"The settings allowed {where} are: {', '.join(allowed)}.",
         code="config_unknown_key",
     )
 
@@ -251,38 +264,6 @@ def _name_list(ui: dict[str, Any], key: str, pattern: re.Pattern[str], example: 
     if len(raw) > MAX_DASHBOARDS or len(set(raw)) != len(raw):
         raise ConfigError(f"[ui] {key} in project.toml lists a name more than once (or more than 100).", hint="List each one once.")
     return tuple(raw)
-
-
-def _old_forms(data: dict[str, Any], name: str) -> None:
-    """The forms the apps rework removed, refused with the contract's migration messages (section 1.6)."""
-    apps = data.get("apps")
-    if isinstance(apps, dict):
-        first = next(iter(apps), "<name>")
-        raise ConfigError(
-            f"project.toml still has the old [apps.{first}] section. Apps are now Python packages, each with its own "
-            "app.toml, and the project lists them under [project] apps. The project cannot be used until this is "
-            "changed.",
-            hint="Move the app into apps/<package>/ with an app.toml (see: mes guide apps), write apps = "
-            f'["<package>"] under [project], and remove [apps.{first}].',
-            code="config_old_format",
-        )
-    jobs = data.get("jobs")
-    if isinstance(jobs, dict):
-        first = next(iter(jobs), "<name>")
-        raise ConfigError(
-            f"project.toml still has [jobs.{first}]. Jobs now belong to the app that runs them, in its app.toml, so "
-            "they are no longer read here.",
-            hint=f"Move the job to [jobs.{first}] in the app's app.toml and drop the app's name from its run line. "
-            "To change a schedule from the project, use [settings.<app>].",
-            code="config_old_format",
-        )
-    ui = data.get("ui")
-    if isinstance(ui, dict) and "data" in ui:
-        raise ConfigError(
-            f"[ui] data is no longer used: every project has one shared database, {name}.sqlite, in its data folder.",
-            hint="Remove the data line from [ui].",
-            code="config_old_format",
-        )
 
 
 def _names_of(data: dict[str, Any], table: str, what: str, example: str) -> tuple[str, ...]:
@@ -306,15 +287,10 @@ def _names_of(data: dict[str, Any], table: str, what: str, example: str) -> tupl
 def parse(data: dict[str, Any], *, app_dir: Path, manifest: Path, sha256: str | None = None) -> AppConfig:
     project = data.get("project")
     if not isinstance(project, dict):
-        if isinstance(data.get("app"), dict):
-            raise ConfigError(
-                "project.toml has an [app] table, but easy-ui now reads [project], so it cannot tell which project "
-                "this is.",
-                hint="Rename the [app] table to [project] (the keys name and title stay the same).",
-            )
         raise ConfigError(
             "project.toml has no [project] table, so easy-ui cannot tell which project this is.",
             hint=f"Add to project.toml:\n{PROJECT_EXAMPLE}",
+            code="config_no_project",
         )
     name = project.get("name")
     if not isinstance(name, str) or not paths.APP_NAME_RE.match(name) or name == "mes":
@@ -323,7 +299,6 @@ def parse(data: dict[str, Any], *, app_dir: Path, manifest: Path, sha256: str | 
             "the project's folders.",
             hint="Set [project] name to 2 to 31 lowercase letters, digits and dashes, starting with a letter (not mes).",
         )
-    _old_forms(data, name)
     for key in data:
         if key not in TOP_KEYS:
             raise _unknown_key("", key, TOP_KEYS)
@@ -432,21 +407,14 @@ def parse(data: dict[str, Any], *, app_dir: Path, manifest: Path, sha256: str | 
 
 
 def _no_project(where: Path | None) -> NotFound:
-    old = paths.find_old_manifest(where)
-    if old is not None and not _is_old_project_file(old):
+    app_toml = paths.find_app_manifest(where)
+    if app_toml is not None:
         return NotFound(
-            f"{paths.display_path(old.parent)} holds an app (its app.toml), not a project, and no project.toml was "
-            "found above it, so easy-ui does not know which project's dashboards to use.",
+            f"{paths.display_path(app_toml.parent)} holds an app (its app.toml), not a project, and no project.toml "
+            "was found above it, so easy-ui does not know which project's dashboards to use.",
             hint="Run the command in the project's folder (the one holding project.toml and listing this app under "
             "[project] apps), or pass --project-dir with that folder.",
             code="not_a_project",
-        )
-    if old is not None:
-        return NotFound(
-            f"There is an app.toml in {paths.display_path(old.parent)}, but easy-ui now reads project.toml, so it "
-            "does not know which project this is.",
-            hint="Rename app.toml to project.toml and its [app] table to [project]; everything else stays the same.",
-            code="old_manifest",
         )
     return NotFound(
         "There is no project here (no project.toml was found in this folder or above), so easy-ui does not know "
@@ -454,18 +422,6 @@ def _no_project(where: Path | None) -> NotFound:
         hint="Run the command inside the project's folder, or pass --project-dir with the folder that holds "
         "project.toml.",
     )
-
-
-def _is_old_project_file(path: Path) -> bool:
-    """An app.toml from before project.toml (it has [ui] data), as opposed to an app's own app.toml."""
-    try:
-        data = tomllib.loads(paths.read_nofollow(path, 1, MAX_PROJECT_TOML_BYTES).decode("utf-8"))
-    except (OSError, ValueError):
-        return True
-    ui = data.get("ui")
-    if isinstance(ui, dict) and "data" in ui:
-        return True
-    return not (isinstance(data.get("data"), dict) or isinstance(data.get("jobs"), dict) or isinstance(ui, dict))
 
 
 def load_snapshot(ui_dir: str | Path) -> AppConfig:
@@ -550,7 +506,7 @@ def _load(app_dir: str | Path | None = None, *, ui_dir: str | Path | None = None
     root = root.resolve()
     manifest = root / paths.MANIFEST_FILE
     if not manifest.is_file():
-        if (root / paths.OLD_MANIFEST_FILE).is_file():
+        if (root / paths.APP_MANIFEST_FILE).is_file():
             raise _no_project(root)
         raise NotFound(
             f"There is no project.toml in {paths.display_path(root)}, so easy-ui cannot tell which project this is.",

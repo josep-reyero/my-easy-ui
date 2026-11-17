@@ -92,8 +92,9 @@ The static page is served from ``easyui/web/``: ``/`` is ``index.html``
 ``web/assets/`` (a file name with a content hash, such as ``app-3f9a1c2e.js``,
 is cached for a year as immutable; others revalidate with an ETag). Only known
 file types are served, never a folder listing, never anything outside those
-folders. Other simple page paths (``/d/overview``) get ``index.html`` too, so
-the page can use real addresses.
+folders. Other simple one-level page paths (``/overview``) get ``index.html``
+too; deeper ones (``/d/overview``) get a short "no page here" page (404) with a
+link back to the start, because the page's own links are relative to its folder.
 
 Cookies: the session cookie is ``easyui-<app>`` on plain local http and
 ``__Host-easyui-<app>`` over HTTPS (then also ``Secure``); always ``HttpOnly``,
@@ -169,6 +170,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import (
+    HTMLResponse,
     JSONResponse,
     PlainTextResponse,
     RedirectResponse,
@@ -1037,7 +1039,7 @@ async def page_ui_file(request: Request) -> Response:
     data, ctype = got
     etag = '"' + hashlib.sha256(data).hexdigest()[:32] + '"'
     headers = {"etag": etag, "cache-control": REVALIDATE}
-    if ctype == "image/svg+xml":
+    if ctype.startswith("image/svg+xml"):
         # An SVG is only ever a picture here: opened on its own it would be a document, so it is a download in a
         # sandbox that can run nothing.
         headers["content-security-policy"] = "default-src 'none'; sandbox"
@@ -1153,9 +1155,26 @@ async def page_other(request: Request) -> Response:
         if parts[0] == "index.html":
             return _index(request)
         return _file_response(request, st, st.settings.web_dir, parts)
-    if all(_PAGE_SEGMENT_RE.match(p) for p in parts):
+    if len(parts) == 1 and _PAGE_SEGMENT_RE.match(parts[0]):
         return _index(request)
+    if all(_PAGE_SEGMENT_RE.match(p) for p in parts):
+        # The page's own files and requests are relative to its folder (so it also works below a path on a
+        # shared host), so it is served only one level deep; deeper, a short page leads back to the start.
+        return _not_found_page(request)
     raise HTTPException(404)
+
+
+def _not_found_page(request: Request) -> Response:
+    up = "../" * max(0, request.url.path.count("/") - 1) or "./"
+    return HTMLResponse(
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>No page here</title>\n"
+        f"<link rel=\"stylesheet\" href=\"{up}assets/style.css\">\n</head>\n<body>\n<main class=\"notfound\">\n"
+        "<h1>There is no page at this address</h1>\n"
+        f"<p><a href=\"{up}\">Open the dashboards</a></p>\n</main>\n</body>\n</html>\n",
+        status_code=404,
+        headers={"cache-control": REVALIDATE},
+    )
 
 
 # ---------------------------------------------------------------- the app

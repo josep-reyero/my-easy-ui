@@ -47,6 +47,7 @@ import json
 import os
 import re
 import stat
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -572,6 +573,17 @@ def _check_together(config: Any, apps: list[App]) -> None:
                 )
 
 
+_NOTED: set[tuple[str, str, str]] = set()
+
+
+def _note_once(config: Any, text: str) -> None:
+    """A one-line note on stderr, said once per project and project.toml (the apps are read often)."""
+    key = (str(config.app_dir), str(config.manifest_sha256), text)
+    if key not in _NOTED:
+        _NOTED.add(key)
+        sys.stderr.write(text + "\n")
+
+
 def load_apps(config: Any) -> tuple[App, ...]:
     """The project's apps in ``[project] apps`` order (through apps.lock.json, or the in-project fallback)."""
     try:
@@ -582,6 +594,8 @@ def load_apps(config: Any) -> tuple[App, ...]:
         if e.code != "apps_lock_stale" or e.detail not in _LOCK_CHANGED or not all(
                 _in_project_ok(config, pkg) for pkg in config.packages):
             raise
+        _note_once(config, "Note: apps.lock.json is out of date (project.toml changed), so easy-ui read the apps "
+                   "[project] apps lists from apps/ in the project folder. To update the list, run: mes apps sync")
         lock = None
     apps: list[App] = []
     if lock is not None:

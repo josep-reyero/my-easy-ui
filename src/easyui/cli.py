@@ -35,7 +35,7 @@ Contract for a feature module
 - Text shown without ``--json`` goes through ``safe_text``: control
   characters (which could clear or retitle the terminal, or fake a line) from
   dashboard files are shown as visible escapes such as ``\x1b``.
-- ``--json``, ``--project-dir PATH`` (old name ``--app-dir``), ``--ui-dir PATH`` and ``--auth-dir PATH`` are taken off the command line before
+- ``--json``, ``--project-dir PATH``, ``--ui-dir PATH`` and ``--auth-dir PATH`` are taken off the command line before
   parsing, so they work in any position; do not add them yourself.
 
 Exit codes: 0 ok, 1 error, 2 usage, 3 not found, 4 not allowed, 5 refused
@@ -230,6 +230,9 @@ def _cmd_tables(args: argparse.Namespace) -> Result:
     hidden = 0
     for t in tables:
         star = "* " if t.get("in_dashboards") else "  "
+        if t.get("refused"):
+            lines.append(f"{star}{t['name']} ({t['kind']}, not read: {t['refused']})")
+            continue
         lines.append(f"{star}{t['name']} ({t['kind']}, {t['rows']} rows)" + (", no sample values" if t.get("samples_hidden") else ""))
         hidden += bool(t.get("samples_hidden"))
         for c in t["columns"]:
@@ -436,7 +439,7 @@ def build_parser() -> tuple[ArgumentParser, list[str]]:
 
 
 # Taken off the command line before parsing, so they work before or after the command.
-# --app-dir is the v0.1 name of --project-dir and still works.
+# --app-dir is accepted as another spelling of --project-dir.
 _FOLDER_OPTIONS = {"--project-dir": "project_dir", "--app-dir": "project_dir", "--ui-dir": "ui_dir", "--auth-dir": "auth_dir"}
 
 

@@ -1,7 +1,7 @@
 """The value-format vocabulary, shared as data so the browser renderer can mirror it.
 
 Dashboards choose how a value looks with ``format: <name>``. The set is small
-and fixed. Formatting is locale-independent in v0.1: ``,`` groups thousands,
+and fixed. Formatting is locale-independent: ``,`` groups thousands,
 ``.`` is the decimal point, months are English three-letter abbreviations.
 Rounding is half away from zero on the exact value (JavaScript's
 ``Number.prototype.toFixed`` behaves the same), and a missing value (NULL)

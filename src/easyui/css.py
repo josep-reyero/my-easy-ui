@@ -11,7 +11,9 @@ tricked agent is caught before anything is published:
   ``@import`` a relative path to another file in ``ui/styles/``. Schemes
   (``https:``, ``data:``, ``javascript:``), absolute paths, ``//host``,
   ``?``, ``#``, ``%`` and ``\\`` are refused, and so is a path that leaves
-  those folders or names a file that does not exist;
+  those folders or names a file that does not exist; ``var()``, ``env()``, ``attr()``,
+  ``if()`` and ``inherit()`` inside those functions, a quoted ``@font-face`` ``src`` and a custom
+  property whose text is a web address are refused too (an address put together at run time);
 - ``expression()``, ``behavior:``, ``-moz-binding``, ``element()`` /
   ``-moz-element()``, ``src()``, ``@namespace`` and ``@document`` are refused;
 - unknown at-rules, unclosed blocks, strings and ``url(`` are errors;
@@ -56,6 +58,7 @@ from typing import Any
 
 MAX_STYLESHEET_BYTES = 200_000
 MAX_DEPTH = 24
+MAX_PROBLEMS = 50  # problems (and, apart, warnings) listed per stylesheet
 ALLOWED_AT_RULES = (
     "media", "supports", "layer", "container", "keyframes", "-webkit-keyframes", "font-face", "import",
     "page", "property", "counter-style", "font-feature-values", "font-palette-values", "scope",
@@ -83,6 +86,12 @@ REFUSED_PROPERTIES = {
     "-moz-binding": "-moz-binding runs code in old browsers, so easy-ui refuses it.",
 }
 URL_STRING_FUNCTIONS = ("image-set", "-webkit-image-set", "image", "cross-fade", "-webkit-cross-fade")
+_LOADING_FUNCTIONS = frozenset(("url", *URL_STRING_FUNCTIONS))
+# Functions whose result is only known when the page is drawn: inside a function that loads a file they would let
+# an address be put together where the checks cannot see it.
+_SUBSTITUTING_FUNCTIONS = frozenset(("var", "env", "attr", "if", "inherit"))
+# A quoted text that is a web address (another site, a protocol-relative address, or a data:/javascript:/blob: link).
+_ADDRESS_RE = re.compile(r"\s*(?://|[A-Za-z][A-Za-z0-9+.-]*://|(?:data|javascript|blob|file|filesystem):)", re.I)
 # Fonts easy-ui's own screens (sign-in, settings, the preview badge) are drawn with; a project's
 # @font-face may not take these names, so it can never change how those screens look.
 # Every font family easy-ui's own screens name (web/assets/style.css; a test keeps the two in step), the generic
@@ -426,8 +435,13 @@ class _Checker:
         self.data_types = list(data_types)
         self.res = CssCheck()
         self._seen_warn: set[tuple[str, str]] = set()
+        self._more_errors = 0
+        self._more_warnings = 0
 
     def err(self, line: int | None, message: str, hint: str | None = None, *, did_you_mean: str | None = None) -> None:
+        if len(self.res.errors) >= MAX_PROBLEMS:
+            self._more_errors += 1
+            return
         self.res.errors.append(_problem(self.file, line, message, hint, did_you_mean, "error"))
 
     def warn(self, line: int | None, message: str, hint: str | None = None, *, did_you_mean: str | None = None,
@@ -436,7 +450,16 @@ class _Checker:
             if key in self._seen_warn:
                 return
             self._seen_warn.add(key)
+        if len(self.res.warnings) >= MAX_PROBLEMS:
+            self._more_warnings += 1
+            return
         self.res.warnings.append(_problem(self.file, line, message, hint, did_you_mean, "warning"))
+
+    def closest(self, word: str, options: Iterable[str], *, warning: bool = False) -> str | None:
+        """The closest name, while problems are still being listed (a suggestion takes time)."""
+        if len(self.res.warnings if warning else self.res.errors) >= MAX_PROBLEMS:
+            return None
+        return _closest(word, options)
 
     # -- references
     def check_url(self, tok: Token, value: str, *, kind: str) -> str | None:
@@ -456,7 +479,7 @@ class _Checker:
             if target[len("styles/"):] not in self.stylesheets:
                 self.err(tok.line, f'@import "{value[:80]}" names a stylesheet that does not exist in ui/styles/.',
                          "Check the file name.",
-                         did_you_mean=_closest(target[len("styles/"):], self.stylesheets))
+                         did_you_mean=self.closest(target[len("styles/"):], self.stylesheets))
                 return None
             if target == f"styles/{self.name}":
                 self.err(tok.line, "This stylesheet imports itself.", "Remove the @import.")
@@ -469,7 +492,7 @@ class _Checker:
             rel = target[len("assets/"):]
             if rel not in self.assets:
                 self.err(tok.line, f'url("{value[:80]}") names a file that is not in ui/assets/ ({rel}).',
-                         "Add the file to ui/assets/ or fix the name.", did_you_mean=_closest(rel, self.assets))
+                         "Add the file to ui/assets/ or fix the name.", did_you_mean=self.closest(rel, self.assets))
                 return None
         self.res.refs.append(target)
         return target
@@ -485,12 +508,19 @@ class _Checker:
             line = self.text.count("\n", 0, bad.start()) + 1
             self.err(line, "The stylesheet contains a control character, which CSS never needs.",
                      "Remove it (it may come from copying text from another program).")
-        toks = [t for t in tokenize(self.text) if t.kind != "comment-unclosed"]
-        if any(t.kind == "comment-unclosed" for t in tokenize(self.text)):
+        all_toks = tokenize(self.text)
+        toks = [t for t in all_toks if t.kind != "comment-unclosed"]
+        if len(toks) != len(all_toks):
             self.err(None, "A comment starting with /* is never closed with */, so the rest of the file is ignored.",
                      "Close the comment.")
         self.toks = toks
         self.walk(0, len(toks), depth=0, context="top")
+        for more, out, level in ((self._more_errors, self.res.errors, "error"),
+                                 (self._more_warnings, self.res.warnings, "warning")):
+            if more:
+                out.append(_problem(self.file, None, f"... and {more} more {'problems' if level == 'error' else 'warnings'}"
+                                    " in this stylesheet (only the first ones are listed).",
+                                    "Fix these first, then check again.", None, level))
         return self.res
 
     def _skip_ws(self, i: int, end: int) -> int:
@@ -502,18 +532,22 @@ class _Checker:
         """The index after the block or function opened at ``i``."""
         pairs = {"{": "}", "[": "]", "(": ")", "function": ")"}
         stack = [pairs[self.toks[i].kind]]
+        braces = 1 if stack[0] == "}" else 0  # how many "}" the stack holds: a stray } closes the nearest {
         j = i + 1
         while j < end and stack:
             k = self.toks[j].kind
             if k in pairs:
                 stack.append(pairs[k])
+                braces += k == "{"
             elif k in ("}", "]", ")"):
                 if k == stack[-1]:
                     stack.pop()
-                elif k == "}" and "}" in stack:
-                    while stack and stack[-1] != "}":
+                    braces -= k == "}"
+                elif k == "}" and braces:
+                    while stack[-1] != "}":
                         stack.pop()
                     stack.pop()
+                    braces -= 1
             j += 1
         if stack:
             what = {"}": "{", "]": "[", ")": "("}[stack[0]]
@@ -565,7 +599,7 @@ class _Checker:
                 if self.toks[i].kind not in ("whitespace",):
                     self.err(t.line, "Something here is neither a rule (selector { ... }) nor an at-rule, so the "
                              "browser ignores it.", "Check for a missing { or a stray character.")
-            self.declaration(i, k)
+            self.declaration(i, k, context)
             i = k
 
     def _inner_end(self, open_i: int, close: int) -> int:
@@ -599,7 +633,7 @@ class _Checker:
         elif name not in ALLOWED_AT_RULES:
             self.err(t.line, f"@{t.value[:40]} is not an at-rule easy-ui knows.",
                      "Use @media, @supports, @container, @layer, @keyframes, @font-face, @import, @page or @property.",
-                     did_you_mean=_closest(name, ALLOWED_AT_RULES))
+                     did_you_mean=self.closest(name, ALLOWED_AT_RULES))
         if name == "import":
             k = self._skip_ws(i + 1, j)
             rest = k + 1
@@ -653,6 +687,8 @@ class _Checker:
                             words.append("\x00")
                         v += 1
                     family = " ".join(words).strip() if words else ""
+                    k = v
+                    continue
             k += 1
         if family is None:
             self.err(at.line, "This @font-face has no font-family, so no text can use it.",
@@ -713,7 +749,7 @@ class _Checker:
                 if cls.lower().startswith("eui-") and cls not in self.classes:
                     self.warn(t.line, f'The class ".{cls[:60]}" is not one of easy-ui\'s names, so this rule matches '
                               "nothing easy-ui draws.", "See the names with: easy-ui style-guide",
-                              did_you_mean=_closest(cls, self.classes), key=("class", cls))
+                              did_you_mean=self.closest(cls, self.classes, warning=True), key=("class", cls))
             elif t.kind == "[":
                 close = self._match(k, j)
                 inner = [x for x in self.toks[k + 1:close - 1] if x.kind != "whitespace"]
@@ -723,7 +759,7 @@ class _Checker:
                     if v not in self.data_types:
                         self.warn(t.line, f'[data-type="{v[:40]}"] is not a kind of component, so this rule matches '
                                   "nothing.", f"The kinds are: {', '.join(self.data_types)}.",
-                                  did_you_mean=_closest(v, self.data_types), key=("type", v))
+                                  did_you_mean=self.closest(v, self.data_types, warning=True), key=("type", v))
                 k = close
                 continue
             elif t.kind == "function":
@@ -731,7 +767,7 @@ class _Checker:
             k += 1
         self.values(i, j, selectors=True)
 
-    def declaration(self, i: int, k: int) -> None:
+    def declaration(self, i: int, k: int, context: str = "style") -> None:
         i = self._skip_ws(i, k)
         if i >= k:
             return
@@ -746,8 +782,37 @@ class _Checker:
                 elif low.startswith("--eui-") and name not in self.properties:
                     self.warn(t.line, f"{name[:60]} is not one of easy-ui's custom properties, so setting it changes "
                               "nothing easy-ui draws.", "See them with: easy-ui style-guide",
-                              did_you_mean=_closest(name, self.properties), key=("prop", name))
+                              did_you_mean=self.closest(name, self.properties, warning=True), key=("prop", name))
+                if name.startswith("--"):
+                    self.custom_property(c + 1, k)
+                elif context == "font-face" and low == "src":
+                    self.font_src(c + 1, k)
         self.values(i, k)
+
+    def custom_property(self, i: int, k: int) -> None:
+        """A custom property may not hold a text that is a web address (it could only be meant to be fetched)."""
+        for x in range(i, k):
+            tk = self.toks[x]
+            if tk.kind == "string" and _ADDRESS_RE.match(tk.value):
+                self.err(tk.line, f'A custom property here holds the address "{tk.value[:80]}"; easy-ui does not '
+                         "allow addresses of other sites or kinds of links in custom properties.",
+                         "Put the file in ui/assets/ and use url(\"../assets/NAME\") where it is shown.")
+
+    def font_src(self, i: int, k: int) -> None:
+        """``src`` of an ``@font-face``: only ``url()`` (and ``local()``, ``format()``, ``tech()``)."""
+        depth = 0
+        for x in range(i, k):
+            tk = self.toks[x]
+            if tk.kind in ("function", "(", "["):
+                depth += 1
+                if tk.kind == "function" and tk.value.lower() in _SUBSTITUTING_FUNCTIONS:
+                    self.err(tk.line, f"The src of this @font-face uses {tk.value.lower()}(), so the font's address "
+                             "could not be checked.", 'Write it as src: url("../assets/NAME.woff2");')
+            elif tk.kind in (")", "]"):
+                depth = max(0, depth - 1)
+            elif tk.kind == "string" and depth == 0:
+                self.err(tk.line, "The src of this @font-face is a plain quoted text; write the font's address as "
+                         "url(...).", 'Write it as src: url("../assets/NAME.woff2");')
 
     def function(self, k: int) -> None:
         t = self.toks[k]
@@ -756,9 +821,12 @@ class _Checker:
             self.err(t.line, REFUSED_FUNCTIONS[low], "Remove it.")
 
     def values(self, i: int, k: int, *, selectors: bool = False) -> None:
-        """Check every url, function and custom property use between i and k."""
-        j = i
-        while j < k:
+        """Check every url, function and custom property use between i and k (one pass: nesting is linear)."""
+        # The functions and brackets open at each token: (closing token, function name or "" for a bracket).
+        stack: list[tuple[str, str]] = []
+        loading = 0  # how many of them load what their strings name: url(), image-set(), image(), cross-fade()
+        closers = {"(": ")", "[": "]", "{": "}"}
+        for j in range(i, k):
             t = self.toks[j]
             if t.kind == "url":
                 self.check_url(t, t.value, kind="url()")
@@ -768,27 +836,22 @@ class _Checker:
             elif t.kind == "bad-string":
                 self.err(t.line, "A quoted text here is not closed before the end of the line.",
                          "Close the quote on the same line.")
+            elif t.kind == "string":
+                if stack and stack[-1][1] in _LOADING_FUNCTIONS:
+                    self.check_url(t, t.value, kind="url()")
             elif t.kind == "function":
                 low = t.value.lower()
                 if not selectors:
                     self.function(j)
+                if loading and low in _SUBSTITUTING_FUNCTIONS:
+                    outer = next(name for _, name in reversed(stack) if name in _LOADING_FUNCTIONS)
+                    self.err(t.line, f"{outer}() here uses {low}(), so the address it loads could not be checked.",
+                             f'Name the file itself, for example {outer}("../assets/NAME" ...).' if outer != "url"
+                             else 'Write it as url("../assets/NAME").')
                 if low == "url":
                     s = self._skip_ws(j + 1, k)
-                    if s < k and self.toks[s].kind == "string":
-                        self.check_url(self.toks[s], self.toks[s].value, kind="url()")
-                    else:
+                    if not (s < k and self.toks[s].kind == "string"):
                         self.err(t.line, "This url( does not hold an address.", 'Write it as url("../assets/NAME").')
-                elif low in URL_STRING_FUNCTIONS:
-                    close = self._match(j, k)
-                    depth = 0
-                    for x in range(j + 1, close - 1):
-                        tk = self.toks[x]
-                        if tk.kind in ("function", "("):
-                            depth += 1
-                        elif tk.kind == ")":
-                            depth -= 1
-                        elif tk.kind == "string" and depth == 0:
-                            self.check_url(tk, tk.value, kind="url()")
                 elif low == "var":
                     s = self._skip_ws(j + 1, k)
                     if s < k and self.toks[s].kind == "ident":
@@ -796,10 +859,16 @@ class _Checker:
                         if name.lower().startswith("--eui-") and name not in self.properties:
                             self.warn(t.line, f"var({name[:60]}) uses a custom property easy-ui does not set.",
                                       "See them with: easy-ui style-guide",
-                                      did_you_mean=_closest(name, self.properties), key=("prop", name))
+                                      did_you_mean=self.closest(name, self.properties, warning=True), key=("prop", name))
+                stack.append((")", low))
+                loading += low in _LOADING_FUNCTIONS
+            elif t.kind in closers:
+                stack.append((closers[t.kind], ""))
+            elif t.kind in (")", "]", "}"):
+                if stack and stack[-1][0] == t.kind:
+                    loading -= stack.pop()[1] in _LOADING_FUNCTIONS
             elif t.kind == "ident" and t.value.lower() == "-moz-binding":
                 self.err(t.line, REFUSED_PROPERTIES["-moz-binding"], "Remove it.")
-            j += 1
 
 
 def _problem(file: str, line: int | None, message: str, hint: str | None, did_you_mean: str | None,
@@ -937,7 +1006,8 @@ def scope_stylesheet(text: str, app: str) -> str:
 
     Each selector ``S`` becomes ``:where([data-app="<app>"]) S, S:where([data-app="<app>"])`` (the second form
     put before a pseudo-element): it matches only elements inside, or themselves, marked as the app's. ``:where()``
-    adds no specificity, so the project's own stylesheets, applied after the apps', keep the last word. Rules
+    adds no specificity, and the project's own stylesheets apply after the apps', so with equal weight and
+    importance the project's rule wins (docs/STYLES.md says exactly who wins). Rules
     inside ``@media``, ``@supports``, ``@layer``, ``@container`` and ``@starting-style`` are scoped the same way;
     rules nested inside a rule follow their parent.
     """

@@ -752,10 +752,24 @@ def test_raw_dot_paths_never_escape(client, path):
 
 
 def test_page_addresses_get_the_page(client):
-    for path in ("/d/overview", "/overview", "/index.html"):
+    for path in ("/overview", "/index.html"):
         r = client.get(path)
         assert r.status_code == 200 and r.headers["content-type"].startswith("text/html"), path
     assert client.get("/Weird_Path!").status_code == 404
+
+
+def test_a_deeper_unknown_address_gets_a_not_found_page_not_a_broken_page(client):
+    """Finding: /nope/x got the dashboards page, whose relative links (assets/app.js) then pointed at /nope/assets/
+    and failed."""
+    for path, up in (("/nope/x", "../"), ("/d/overview", "../"), ("/a/b/c/", "../../../")):
+        r = client.get(path)
+        assert r.status_code == 404 and r.headers["content-type"].startswith("text/html"), path
+        assert "There is no page at this address" in r.text
+        assert f'href="{up}assets/style.css"' in r.text and f'href="{up}"' in r.text
+        assert "app.js" not in r.text
+        assert "default-src 'none'" in r.headers["content-security-policy"]
+    r = client.get("/overview")
+    assert r.status_code == 200 and 'src="assets/app.js"' in r.text
 
 
 def test_static_files_do_not_need_a_session_and_do_not_count_as_use(client, env):

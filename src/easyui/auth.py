@@ -52,7 +52,7 @@ seconds). So:
 - While someone keeps sending wrong passwords (every few milliseconds, all
   the time), a browser that has never signed in shares their bucket and its
   *password* attempts are refused almost every time. A new device and an
-  attacker look the same to the server here. This no longer locks the owner
+  attacker look the same to the server here. This does not lock the owner
   out: passkey sign-in (``sign_in_passkey``) is never throttled, because a
   passkey cannot be guessed (each answer is a signature over a fresh,
   single-use challenge, checked against a stored public key). Recovery codes

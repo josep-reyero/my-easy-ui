@@ -227,7 +227,26 @@ class _Section:
     n: int = -1  # its number among the placed sections
 
 
-def _check_sections(ctx: spec._Ctx, data: Any, *, prefix: str | None, app_name: str | None) -> list[dict[str, Any]]:
+def _hand_written_app_ok(ctx: spec._Ctx, row: list[Any], path: tuple[Any, ...], app_name: str | None,
+                         project_file: bool) -> bool:
+    """A hand-written ``app:`` on a component names the app the file belongs to; a project's own file has none."""
+    good = True
+    for c, comp in enumerate(row):
+        if not isinstance(comp, dict) or comp.get("app") is None:
+            continue
+        if project_file:
+            ctx.err(path + (c, "app"), "This component of the project's own file has an app: setting, which only "
+                    "easy-ui sets (on what an app brings).", hint="Remove the app: setting.")
+            good = False
+        elif comp.get("app") != app_name:
+            ctx.err(path + (c, "app"), f"This component says it comes from the app {str(comp.get('app'))[:40]!r}, "
+                    f"but the file belongs to {app_name}.", hint="Remove the app: setting; easy-ui sets it.")
+            good = False
+    return good
+
+
+def _check_sections(ctx: spec._Ctx, data: Any, *, prefix: str | None, app_name: str | None,
+                    project_file: bool = False) -> list[dict[str, Any]]:
     """The structure of a sections file; returns the sections that can be placed (as plain dicts)."""
     if not isinstance(data, dict):
         ctx.err((), "A sections file is a set of settings: spec: and sections:.",
@@ -327,12 +346,9 @@ def _check_sections(ctx: spec._Ctx, data: Any, *, prefix: str | None, app_name: 
                         hint="Start the row with '- -' (a list inside the list).")
                 good = False
             else:
-                for c, comp in enumerate(row):
-                    if isinstance(comp, dict) and app_name is not None and comp.get("app") not in (None, app_name):
-                        ctx.err(path + ("layout", r, c, "app"),
-                                f"This component says it comes from the app {str(comp.get('app'))[:40]!r}, but the "
-                                f"section belongs to {app_name}.", hint="Remove the app: setting; easy-ui sets it.")
-                        good = False
+                if app_name is not None and not _hand_written_app_ok(ctx, row, path + ("layout", r), app_name,
+                                                                     project_file):
+                    good = False
         if good:
             out.append({"index": i, "id": sid, "position": pos, "anchor": m.group("anchor") if m else None,
                         "queries": queries, "layout": layout})
@@ -379,7 +395,8 @@ def _compose_one(slug: str, base: Part, origin: str, contributions: list[tuple[A
             entry.errors.append(sbad)
             continue
         ctx = spec._Ctx(part.label, lines, data)
-        for s in _check_sections(ctx, data, prefix=app.prefix, app_name=app.name):
+        for s in _check_sections(ctx, data, prefix=app.prefix, app_name=app.name,
+                                 project_file=part.origin == "project"):
             if s["id"] in used_ids:
                 ctx.err(("sections", s["index"], "id"), f'The dashboard "{slug}" already has a section called '
                         f'"{s["id"]}" (from another app), so this one cannot be told apart.',
@@ -397,6 +414,16 @@ def _compose_one(slug: str, base: Part, origin: str, contributions: list[tuple[A
         return entry
 
     base_ctx = spec._Ctx(base.label, base_lines, base_data)
+    if isinstance(base_data, dict):
+        # A hand-written app: names the file's own app; the project's own dashboards have none.
+        if origin == "project" and base_data.get("app") is not None:
+            base_ctx.err(("app",), "The project's own dashboard has an app: line, which only easy-ui sets (on the "
+                         "dashboards an app ships).", hint="Remove the app: line.")
+        if isinstance(base_data.get("layout"), list):
+            for r, row in enumerate(base_data["layout"]):
+                if isinstance(row, list):
+                    _hand_written_app_ok(base_ctx, row, ("layout", r), None if origin == "project" else origin,
+                                         origin == "project")
     composed: dict[str, Any]
     row_origin: dict[int, tuple[str, tuple[Any, ...], Any]] = {}
     query_origin: dict[str, tuple[str, tuple[Any, ...], Any]] = {}

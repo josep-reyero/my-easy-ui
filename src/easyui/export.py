@@ -632,7 +632,7 @@ def _data_address(look: styles.StyleSet, target: str) -> str | None:
     if got is None:
         return None
     data, ctype = got
-    if ctype == "image/svg+xml":
+    if ctype.startswith("image/svg+xml"):
         why = styles.svg_problem(data)
         if why:
             raise Refused(

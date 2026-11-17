@@ -28,7 +28,8 @@ Limits
 ``MAX_STYLESHEETS`` (20) files of at most ``css.MAX_STYLESHEET_BYTES`` (200 KB),
 ``MAX_STYLES_BYTES`` (1 MB) together; ``MAX_ASSETS`` (60) files of at most
 ``MAX_ASSET_BYTES`` (2 MB), ``MAX_ASSETS_BYTES`` (8 MB) together; the theme at most
-``theme.MAX_THEME_BYTES`` (64 KB).
+``theme.MAX_THEME_BYTES`` (64 KB). Each size is checked before a file is read, and a folder that goes past a
+limit is not read any further (``StyleFiles.too_large``; ``check`` then lists only the size problems).
 
 Public API
 ----------
@@ -36,7 +37,8 @@ Public API
     changing one is a breaking change), ``ASSET_TYPES`` (suffix -> content type).
 ``Blob`` (dataclass): ``path`` (``"theme.yaml"``, ``"styles/a.css"``, ``"assets/fonts/x.woff2"``), ``label``
     (as shown, ``"ui/styles/a.css"``), ``data``, ``sha256``.
-``StyleFiles`` (dataclass): ``theme`` (Blob | None), ``stylesheets``, ``assets`` (lists of Blob), ``problems``, ``notes``;
+``StyleFiles`` (dataclass): ``theme`` (Blob | None), ``stylesheets``, ``assets`` (lists of Blob), ``problems``, ``notes``,
+    ``too_large``;
     ``blobs()``, ``empty``.
 ``read_style_dir(ui_dir, *, label_prefix="ui/") -> StyleFiles``   hardened reading of a project's ui folder.
 ``asset_type(name, data) -> (content_type | None, problem | None)``   by suffix AND first bytes; SVG content checked.
@@ -79,7 +81,7 @@ ASSET_TYPES = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".webp": "image/webp",
-    ".svg": "image/svg+xml",
+    ".svg": "image/svg+xml; charset=utf-8",  # svg_problem() refuses any other declared encoding
 }
 STYLESHEET_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,60}\.css\Z")
 ASSET_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,80}\Z")
@@ -198,6 +200,7 @@ class StyleFiles:
     notes: list[str] = field(default_factory=list)
     app_stylesheets: list[Blob] = field(default_factory=list)  # paths apps/<app name>/styles/<name>.css
     app_assets: list[Blob] = field(default_factory=list)  # paths apps/<app name>/assets/<path>
+    too_large: bool = False  # a folder went past a count or total-size limit, so it was not read to the end
 
     def blobs(self) -> list[Blob]:
         return ([self.theme] if self.theme else []) + list(self.stylesheets) + list(self.assets) + \
@@ -237,8 +240,21 @@ def _problem(label: str, message: str, hint: str | None = None, line: int | None
     return d
 
 
-def read_at(dir_fd: int, name: str, label: str, limit: int, what: str) -> bytes | dict[str, Any]:
-    """One plain file below an open folder, without following links; a problem dict when refused."""
+class _OverBudget(Exception):
+    """A file would take a folder past its total-size limit; ``size`` is the most known about the file."""
+
+    def __init__(self, size: int) -> None:
+        super().__init__(size)
+        self.size = size
+
+
+def read_at(dir_fd: int, name: str, label: str, limit: int, what: str, *,
+            budget: int | None = None) -> bytes | dict[str, Any]:
+    """One plain file below an open folder, without following links; a problem dict when refused.
+
+    With ``budget`` (what the folder may still hold), raises ``_OverBudget`` instead of reading a file that would
+    go past it: its size is checked before it is read, and again while reading (a file can grow).
+    """
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | _O_NOFOLLOW | _O_CLOEXEC, dir_fd=dir_fd)
     except OSError as e:
@@ -258,6 +274,8 @@ def read_at(dir_fd: int, name: str, label: str, limit: int, what: str) -> bytes 
         if st.st_size > limit:
             return _problem(label, f"{label} is {st.st_size:,} bytes, more than the {limit:,} bytes easy-ui accepts "
                             f"for {what}.", "Make it smaller.")
+        if budget is not None and st.st_size > budget:
+            raise _OverBudget(st.st_size)
         chunks, total = [], 0
         while True:
             chunk = os.read(fd, 65536)
@@ -268,6 +286,8 @@ def read_at(dir_fd: int, name: str, label: str, limit: int, what: str) -> bytes 
             if total > limit:
                 return _problem(label, f"{label} is larger than the {limit:,} bytes easy-ui accepts for {what}.",
                                 "Make it smaller.")
+            if budget is not None and total > budget:
+                raise _OverBudget(total)
         return b"".join(chunks)
     finally:
         os.close(fd)
@@ -327,6 +347,7 @@ def read_app_styles(app: Any, out: StyleFiles) -> None:
         out.app_assets.append(Blob(f"apps/{app.name}/{b.path}", b.label, b.data, b.sha256))
     out.problems.extend(sub.problems)
     out.notes.extend(sub.notes)
+    out.too_large = out.too_large or sub.too_large
 
 
 def read_project_look(config: Any, apps: Any = None) -> StyleFiles:
@@ -383,6 +404,7 @@ def _read_stylesheets(ui: int, out: StyleFiles, prefix: str) -> None:
             out.notes.append(f"Only .css files in {label_dir}/ are used; these were left out: {', '.join(other[:5])}"
                              + (" and others." if len(other) > 5 else "."))
         if len(candidates) > MAX_STYLESHEETS:
+            out.too_large = True
             out.problems.append(_problem(label_dir, f"There are {len(candidates)} stylesheets in {label_dir}/, more than "
                                          f"the {MAX_STYLESHEETS} easy-ui accepts.", "Join some of them into one file."))
             return
@@ -394,17 +416,27 @@ def _read_stylesheets(ui: int, out: StyleFiles, prefix: str) -> None:
                                              "Use lowercase letters, digits, '.', '-' and '_', ending in .css, for "
                                              "example 10-layout.css (files are applied in name order)."))
                 continue
-            got = read_at(d, name, label, css.MAX_STYLESHEET_BYTES, "a stylesheet")
+            try:
+                got = read_at(d, name, label, css.MAX_STYLESHEET_BYTES, "a stylesheet",
+                              budget=MAX_STYLES_BYTES - total)
+            except _OverBudget as e:
+                # Nothing more is read: the folder is refused as a whole.
+                out.too_large = True
+                out.problems.append(_problem(label_dir, f"The stylesheets in {label_dir}/ are more than "
+                                             f"{total + e.size:,} bytes together, more than the {MAX_STYLES_BYTES:,} "
+                                             "easy-ui accepts.", "Remove rules that are not used."))
+                break
             if isinstance(got, dict):
                 out.problems.append(got)
                 continue
             total += len(got)
             out.stylesheets.append(Blob(f"styles/{name}", label, got, _sha(got)))
-        if total > MAX_STYLES_BYTES:
-            out.problems.append(_problem(label_dir, f"The stylesheets are {total:,} bytes together, more than the "
-                                         f"{MAX_STYLES_BYTES:,} easy-ui accepts.", "Remove rules that are not used."))
     finally:
         os.close(d)
+
+
+class _Stop(Exception):
+    """Nothing more of a folder is read."""
 
 
 def _read_assets(ui: int, out: StyleFiles, prefix: str) -> None:
@@ -449,11 +481,19 @@ def _read_assets(ui: int, out: StyleFiles, prefix: str) -> None:
                 continue
             count += 1
             if count > MAX_ASSETS:
-                if count == MAX_ASSETS + 1:
-                    out.problems.append(_problem(root_label, f"There are more than {MAX_ASSETS} files in ui/assets/.",
-                                                 "Keep only the fonts and pictures the stylesheets use."))
-                continue
-            got = read_at(fd, name, label, MAX_ASSET_BYTES, "a font or picture")
+                out.too_large = True
+                out.problems.append(_problem(root_label, f"There are more than {MAX_ASSETS} files in {root_label}/.",
+                                             "Keep only the fonts and pictures the stylesheets use."))
+                raise _Stop
+            try:
+                got = read_at(fd, name, label, MAX_ASSET_BYTES, "a font or picture", budget=MAX_ASSETS_BYTES - total)
+            except _OverBudget as e:
+                # Nothing more is read: the folder is refused as a whole.
+                out.too_large = True
+                out.problems.append(_problem(root_label, f"The files in {root_label}/ are more than "
+                                             f"{total + e.size:,} bytes together, more than the {MAX_ASSETS_BYTES:,} "
+                                             "easy-ui accepts.", "Make the pictures smaller (webp is small)."))
+                raise _Stop from None
             if isinstance(got, dict):
                 out.problems.append(got)
                 continue
@@ -462,11 +502,10 @@ def _read_assets(ui: int, out: StyleFiles, prefix: str) -> None:
 
     try:
         walk(d, "", 0)
+    except _Stop:
+        pass
     finally:
         os.close(d)
-    if total > MAX_ASSETS_BYTES:
-        out.problems.append(_problem(root_label, f"The files in ui/assets/ are {total:,} bytes together, more than the "
-                                     f"{MAX_ASSETS_BYTES:,} easy-ui accepts.", "Make the pictures smaller (webp is small)."))
 
 
 # ---------------------------------------------------------------- assets
@@ -553,6 +592,12 @@ def svg_problem(data: bytes) -> str | None:
     def entity(*_a):
         raise _SvgRefused("declares a DOCTYPE or entities")
 
+    def xml_decl(_version, encoding, _standalone):
+        # The file is read as UTF-8 here and served as UTF-8; a file declaring another encoding would be read
+        # differently by a browser that honours the declaration, so what was checked would not be what is drawn.
+        if encoding is not None and encoding.strip().lower() != "utf-8":
+            raise _SvgRefused(f'declares the text encoding "{encoding[:40]}" (only UTF-8 is allowed)')
+
     def pi(target, _data):
         raise _SvgRefused("has a processing instruction (for example a linked stylesheet)")
 
@@ -587,6 +632,7 @@ def svg_problem(data: bytes) -> str | None:
     parser.NotationDeclHandler = entity
     parser.ExternalEntityRefHandler = lambda *_a: (_ for _ in ()).throw(_SvgRefused("declares a DOCTYPE or entities"))
     parser.ProcessingInstructionHandler = pi
+    parser.XmlDeclHandler = xml_decl
     parser.StartElementHandler = start
     try:
         parser.Parse(data, True)
@@ -716,6 +762,9 @@ class StyleCheck:
 def check(files: StyleFiles) -> StyleCheck:
     """Check the theme, every stylesheet and every asset together; with no errors, the StyleSet to serve."""
     res = StyleCheck(errors=list(files.problems), notes=list(files.notes))
+    if files.too_large:
+        # A folder over its limits is refused as it is; checking what was read of it would only take time.
+        return res
     assets: dict[str, Blob] = {}
     types: dict[str, str] = {}
     for b in files.assets:
@@ -865,6 +914,8 @@ def style_guide() -> dict[str, Any]:
         "theme": themes.catalog(),
         "rules": [
             "url() and @import only with relative paths to files in ui/assets/ and ui/styles/",
+            "no var(), env() or attr() inside url(), image-set(), image() or cross-fade(), and no web address as "
+            "the text of a custom property",
             "no expression(), behavior:, -moz-binding, element(), src(), @namespace or @document",
             "@font-face names may not be the names of fonts easy-ui's own screens use (Arial, Georgia, system-ui, ...)",
             "charts read their colours, fonts, line width and gridlines from the --eui-chart-* custom properties of "

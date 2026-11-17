@@ -189,6 +189,12 @@ a {
   animation: appear 0.2s ease-out 0.6s both;
 }
 
+.notfound {
+  max-width: 32rem;
+  margin: 20vh auto;
+  padding: 0 var(--gutter, 16px);
+}
+
 .noscript {
   max-width: 32rem;
   margin: 20vh auto;

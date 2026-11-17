@@ -1283,7 +1283,7 @@ def restore_files(config: AppConfig, version: int | str | None = None, *, now: _
 
     A version published from a project with apps keeps the project's own files (``ui/dashboards/`` and
     ``ui/sections/``) as they were; those are put back. The apps' files are the apps' own and are not touched.
-    An older version (or one published from an archive) has only the dashboards: they go to ``ui/dashboards/``.
+    A version with only dashboards (one published from an archive) puts them in ``ui/dashboards/``.
     Files that would be replaced or that are not part of the version are first moved into
     ``.before-restore-<time>/`` beside them (ignored by easy-ui because the name starts with a dot), so nothing is
     lost. Never follows links.
@@ -1508,9 +1508,13 @@ def _look_text(entries: list[dict[str, Any]]) -> str:
     n = sum(1 for e in entries if e["path"].startswith("assets/"))
     if n:
         parts.append(f"{n} font or picture file{'s' if n != 1 else ''}")
-    n = sum(1 for e in entries if e["path"].startswith("apps/") and "/styles/" in e["path"])
+    app_kinds = [e["path"].split("/")[2] for e in entries if e["path"].startswith("apps/") and e["path"].count("/") >= 3]
+    n = app_kinds.count("styles")
     if n:
         parts.append(f"{n} app stylesheet{'s' if n != 1 else ''}")
+    n = app_kinds.count("assets")
+    if n:
+        parts.append(f"{n} app font or picture file{'s' if n != 1 else ''}")
     return (", with " + " and ".join(parts)) if parts else ""
 
 

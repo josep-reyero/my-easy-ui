@@ -16,9 +16,9 @@ To see what data there is, run `easy-ui tables`.
 ## The project's settings (`project.toml`)
 
 easy-ui reads `[project]` (`name`, `title`, `version`, `apps`), `[ui]`, and the *names* of
-`[tables]` and `[views]` from the project's `project.toml` (my-easy-software's apps contract,
+`[tables]` and `[views]` from the project's `project.toml` (**my-easy-software**'s apps contract,
 section 1). Everything else in those tables, and `[settings]` and `[storage]`, belongs to
-my-easy-software. Unknown top-level tables and unknown keys in `[project]` or `[ui]` are errors.
+**my-easy-software**. Unknown top-level tables and unknown keys in `[project]` or `[ui]` are errors.
 
 ```toml
 [project]
@@ -51,8 +51,9 @@ list with some of its names, in its own order.
 in the order they were found: each app's dashboards, in the order of `apps`, then the project's
 own, by file name.
 
-The old forms (`[apps.<name>]`, `[jobs.<name>]`, `[ui] data`, a project without `apps`, or a
-root `app.toml`) are refused with a message saying what to change.
+Any other setting is refused with the closest correct name, or, for one that belongs elsewhere
+(`[jobs.<name>]` in an app's `app.toml`, the app list under `[project] apps`), with where it
+goes. A project.toml without `[project] apps` is refused too.
 
 ## A complete example
 
@@ -146,7 +147,7 @@ layout:
 | `queries` | no | Named read-only SQL queries. Needed by every component except `text` and `controls`. |
 | `layout` | yes | A list of rows; each row is a list of 1 to 6 components. |
 | `theme` | no | This dashboard's own look: `colors`, `dark`, `fonts`, `type`, `radius`, `density`, `cards`, `chart`, as in `ui/theme.yaml` (see [STYLES.md](STYLES.md)). |
-| `app` | no | The app the dashboard belongs to. easy-ui sets it on an app's dashboards when it composes them; written by hand it must name that same app. |
+| `app` | no | The app the dashboard belongs to. easy-ui sets it on an app's dashboards when it composes them; written by hand in an app's dashboard it must name that same app, and the project's own dashboards may not have it. |
 
 Any other key is an error. YAML anchors and aliases (`&` / `*`), merge keys (`<<`) and repeated keys
 are errors too, so what you read is exactly what runs.
@@ -242,7 +243,7 @@ Every component also takes two settings for stylesheets (see [STYLES.md](STYLES.
 |---|---|
 | `id` | A stable name: lowercase letters, digits and `-`, starting with a letter (up to 41 characters), unique in the dashboard, not of the form `r1c2`. On the page as `data-id`. Without it the id is `r<row>c<column>`, counted from 0. |
 | `class` | One class name or a list of up to 8, for the project's stylesheets to hook on. Same characters as `id`; may not start with `eui-`. |
-| `app` | Set by easy-ui on the components an app contributes (its name); on the page as `data-app`, which scopes the app's stylesheets. Written by hand it must name the app the file belongs to. |
+| `app` | Set by easy-ui on the components an app contributes (its name); on the page as `data-app`, which scopes the app's stylesheets. Written by hand in an app's file it must name that app; the project's own files (`ui/dashboards/`, `ui/sections/`) may not have it. |
 
 A layout item may also be an **anchor**, a place where apps can add sections:
 
@@ -357,7 +358,7 @@ Params without a control on the page keep their default; validation warns about 
 A missing value (NULL) always shows as `—`. Without a format, numbers use `number` and text is
 shown unchanged. Text given to a numeric format is shown unchanged unless it is plain numeric text.
 Rounding is half away from zero; a value that rounds to zero has no minus sign. `,` groups
-thousands and `.` is the decimal point (fixed in v0.1). The exact contract, with examples the
+thousands and `.` is the decimal point. The exact contract, with examples the
 browser renderer is tested against, is `easyui.formats.FORMATS`.
 
 ## Checking a dashboard
@@ -399,10 +400,21 @@ its line, and a `place` such as `section "walks", row 1, first component (bar), 
 ## Dashboards from apps
 
 A project's apps (see `[project] apps`) can bring dashboards, sections for other dashboards, and
-a look. easy-ui finds each app's folder in `apps.lock.json` (written by `mes apps sync`, and
-checked against project.toml: a stale list is refused with "Run: mes apps sync"), or, before
-that file exists, at `apps/<package>/` in the project. It reads every file of an app from the
-open app folder, never through a link, never outside it, and never more than a set size.
+a look. easy-ui finds each app's folder in `apps.lock.json` (written by `mes apps sync`), or,
+when that file does not exist, at `apps/<package>/` in the project. The list is checked against
+project.toml:
+
+- When it is out of date only because project.toml changed (the file's hash, or the packages
+  `[project] apps` lists or their order) and every package `[project] apps` lists has an
+  `apps/<package>/app.toml` inside the project folder, easy-ui reads exactly those apps from
+  there, in that order (as if there were no list), and prints a one-line note on stderr ending
+  in "run: mes apps sync". Nothing outside the project folder is read in that case.
+- Otherwise a stale list is refused with "Run: mes apps sync": a damaged list, a list for another
+  project, a listed path that does not match, or a project.toml change when some app is
+  installed outside the project.
+
+It reads every file of an app from the open app folder, never through a link, never outside
+it, and never more than a set size.
 
 An app's `app.toml` says what it brings (easy-ui reads `[app] name` and `title`,
 `[data] tables`, and `[ui]`):

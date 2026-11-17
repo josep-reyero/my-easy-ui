@@ -297,7 +297,7 @@ def test_read_and_check_a_whole_look(tmp_path):
     assert st.get("theme.css")[1].startswith("text/css")
     assert b"@font-face" in st.get("theme.css")[0]  # project fonts are declared for the whole page
     assert st.get("styles/a.css") == (GOOD_CSS.encode(), "text/css; charset=utf-8")
-    assert st.get("assets/logo.svg")[1] == "image/svg+xml"
+    assert st.get("assets/logo.svg")[1] == "image/svg+xml; charset=utf-8"
     assert st.get("assets/fonts/notes.woff2")[1] == "font/woff2"
     for bad in ("styles/../theme.yaml", "theme.yaml", "assets/missing.png", "styles/b.css", "../x"):
         assert st.get(bad) is None

@@ -247,9 +247,31 @@ app's stylesheet, also inside `@media`, `@supports`, `@layer` and `@container`:
 :where([data-app="fitness-sleep"]) .eui-title, .eui-title:where([data-app="fitness-sleep"]) { letter-spacing: 0.02em; }
 ```
 
-`:where()` adds nothing to a selector's weight, and the apps' stylesheets load before the
-project's, so **the project's CSS always has the last word**. A project that replaces an app's
-dashboard with its own file (`ui/dashboards/<name>.yaml`) also drops that app's look from it.
+The mark goes on the app's dashboard as a whole, so an app's stylesheet also applies to the
+sections *other* apps add to that dashboard (they sit inside it); those sections get their own
+app's stylesheet as well. On a section an app adds to one of the project's own dashboards, only
+that app's stylesheet (and the project's) applies.
+
+**Who wins** when an app's rule and a project rule set the same thing on the app's content is
+decided by the ordinary CSS cascade, in this order:
+
+1. `!important` beats a normal declaration, so an app's `!important` beats the project's normal
+   rules.
+2. Cascade layers: a normal rule outside any `@layer` beats a normal rule inside one (for
+   `!important` it is the other way round). Layers are ordered by where their name first
+   appears, and the apps' stylesheets come first, so a layer an app names comes before one the
+   project adds later; a layer name used by both is one layer.
+3. Weight (specificity): the `:where()` easy-ui adds weighs nothing, but the app's own selector
+   keeps its weight, so an app's `.eui-row .eui-title` beats a project's `.eui-title`.
+4. Order: with everything above equal, the project's rule wins, because the apps' stylesheets
+   load before the project's.
+
+So the project has the last word whenever its rule is at least as heavy as the app's, of the
+same importance and not in a layer when the app's is not. To be sure of it, write the project's
+rule unlayered with a selector at least as specific as the app's (`[data-app="fitness-sleep"]
+.eui-title` is usually enough), and with `!important` where the app used it. A project that
+replaces an app's dashboard with its own file (`ui/dashboards/<name>.yaml`) drops that app's look
+from it altogether.
 An app's `@font-face` rules are kept in `theme.css` before the project's; its fonts and pictures
 are served under `/ui/apps/<app>/assets/`, its stylesheets under `/ui/apps/<app>/styles/`, after
 sign-in only, like the project's. An app's themes are listed by `easy-ui themes` as
@@ -266,12 +288,19 @@ built-in fonts.
   address only, and easy-ui refuses before publishing any `url()`, `image-set()` or `@import` that
   is not a relative path to a file in `ui/assets/` or `ui/styles/` (for an app: its own
   `assets/` and `styles/`; also when written with CSS
-  escapes such as `u\72l(`), plus `expression()`, `element()`, `src()`, `behavior:`,
+  escapes such as `u\72l(`). Inside `url()`, `image-set()`, `image()` and `cross-fade()`,
+  `var()`, `env()`, `attr()`, `if()` and `inherit()` are refused (they would put an address
+  together where it cannot be checked), so is a plain quoted text as an `@font-face` `src` (write
+  `url(...)`), and so
+  is a custom property holding a text that is a web address (`"https://..."`, `"//..."`,
+  `"data:..."`; a text that merely mentions one, like `"Data from https://..."`, is fine). Also
+  refused: `expression()`, `element()`, `src()`, `behavior:`,
   `-moz-binding`, `@namespace` and `@document`. Unknown at-rules, unclosed blocks, strings or
   comments, and control characters are errors too.
 - **Files are read the safe way.** Like dashboards, the look is read without following links,
   with limits: at most 20 stylesheets (200 KB each, 1 MB together), 60 assets (2 MB each, 8 MB
-  together) and a 64 KB theme. A published version records the size and SHA-256 of every file;
+  together) and a 64 KB theme; sizes are checked before a file is read, and a folder past a limit
+  is not read any further. A published version records the size and SHA-256 of every file;
   each is checked again (hash and content) before it is served, and a version whose files no
   longer match is not used.
 - **What remains possible, on purpose:** a project's CSS can hide, move or cover what its own

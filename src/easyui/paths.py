@@ -39,15 +39,14 @@ default layout on a personal machine too); and only for a ui folder chosen
 with ``EASYUI_STATE_HOME`` (tests, personal machines) ``<ui>/auth``. Before
 using it, the commands that sign people in refuse a sign-in folder that is a
 link, is not owned by the account running them, is not mode 0700, or sits in a
-folder another account (other than root) can change (``check_auth_dir``). An
-old ``ui/auth`` is never moved or read: its contents cannot be trusted, so the
-owner sets the password (and adds passkeys) again.
+folder another account (other than root) can change (``check_auth_dir``). Sign-in
+data is never read from inside the ui folder (the project's account can change it).
 
 Public API
 ----------
 ``APP_NAME_RE`` / ``PROJECT_NAME_RE``  ``^[a-z][a-z0-9-]{1,30}$`` (same as mes).
-``MANIFEST_FILE`` ``"project.toml"``; ``OLD_MANIFEST_FILE`` ``"app.toml"`` (an old project file at a project's
-root is no longer read; an app's own app.toml is read by ``easyui.project``).
+``MANIFEST_FILE`` ``"project.toml"``; ``APP_MANIFEST_FILE`` ``"app.toml"`` (an app's own file, read by
+``easyui.project``; found here only to say that a folder holds an app, not a project).
 ``data_home() -> Path``, ``state_home() -> Path``, ``server_root() -> Path | None``
     Base folders (not created).
 ``config_path() -> Path``                 this machine's mes config file (may not exist).
@@ -66,7 +65,7 @@ root is no longer read; an app's own app.toml is read by ``easyui.project``).
 ``find_app_dir(start=None) -> Path | None``
     Nearest folder at or above ``start`` (default: current directory) holding
     ``project.toml``.
-``find_old_manifest(start=None) -> Path | None``  the nearest ``app.toml`` (for a helpful message).
+``find_app_manifest(start=None) -> Path | None``  the nearest ``app.toml`` (for a helpful message).
 ``open_nofollow(path, depth, *, directory=False) -> int``
     Opens ``path`` without following a link in its last ``depth`` components (the folder ``depth``
     levels up is the trusted start). Used for everything the server reads under the ui folder,
@@ -108,7 +107,7 @@ from typing import Any
 from easyui.errors import ConfigError, Refused, UsageError
 
 MANIFEST_FILE = "project.toml"
-OLD_MANIFEST_FILE = "app.toml"
+APP_MANIFEST_FILE = "app.toml"
 PROJECT_FILE = "project.json"
 APP_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}\Z")
 PROJECT_NAME_RE = APP_NAME_RE
@@ -464,9 +463,9 @@ def find_app_dir(start: str | Path | None = None) -> Path | None:
     return _find(MANIFEST_FILE, start)
 
 
-def find_old_manifest(start: str | Path | None = None) -> Path | None:
-    d = _find(OLD_MANIFEST_FILE, start)
-    return d / OLD_MANIFEST_FILE if d is not None else None
+def find_app_manifest(start: str | Path | None = None) -> Path | None:
+    d = _find(APP_MANIFEST_FILE, start)
+    return d / APP_MANIFEST_FILE if d is not None else None
 
 
 def safe_join(base: Path, relative: str, *, what: str) -> Path:

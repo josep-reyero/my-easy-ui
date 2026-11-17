@@ -31,9 +31,8 @@ owner, group, mode, why) and in the units' header comment:
 - ``<root>/<project>/ui/specs``  ``mes-<project>:mes-<project>-web``  2750
 - ``<root>/<project>/auth``      ``mes-<project>-web:mes-<project>-web``  0700
 
-An old ``<root>/<project>/ui/auth`` is not moved or read: the project's account
-could have changed it, so its contents cannot be trusted. Set the password and
-add the passkeys again after moving to this layout.
+Sign-in data is never read from ``<root>/<project>/ui``: the project's account
+can change that folder, so the sign-in lives beside it, in ``auth``.
 
 ``mes-<project>`` runs ``easy-ui data build`` and ``easy-ui publish`` (with
 ``MES_ROOT=<root>``); the person runs ``easy-ui set-password``, ``passkeys``,

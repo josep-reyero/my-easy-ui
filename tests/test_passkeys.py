@@ -610,7 +610,7 @@ def test_registration_challenge_is_bound_to_the_session(env):
 
 
 def test_passkey_sign_in_works_while_password_guessing_is_paused(with_passkey):
-    """The v0.1 known limit: someone guessing passwords kept new browsers out. Passkeys are not throttled."""
+    """The known limit: someone guessing passwords kept new browsers out. Passkeys are not throttled."""
     env, a = with_passkey
     attacker = env.make()
     codes = [password_login(attacker, "wrong password!!").status_code for _ in range(8)]

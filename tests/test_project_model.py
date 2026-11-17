@@ -34,7 +34,7 @@ def test_project_toml_keys(tmp_path):
 @pytest.mark.parametrize(
     "text, words",
     [
-        ('[app]\nname = "demo"\n', "Rename the [app] table"),
+        ('[app]\nname = "demo"\n', "no [project] table"),
         ('[project]\nname = "demo"\napps = ["demo_main"]\nversion = "1 2"\n', "version"),
         ('[project]\nname = "demo"\napps = ["demo_main"]\n[ui]\nrefresh_after = ["Sync Job"]\n', "job id"),
         ('[project]\nname = "demo"\napps = ["demo_main"]\n[ui]\nrefresh_after = "sync"\n', "list of job ids"),
@@ -47,17 +47,17 @@ def test_project_toml_errors(tmp_path, text, words):
     assert words in e.value.message + (e.value.hint or "")
 
 
-def test_old_app_toml_gets_a_plain_message(tmp_path, monkeypatch):
+def test_an_app_folder_is_not_a_project(tmp_path, monkeypatch):
     (tmp_path / "app.toml").write_text('[app]\nname = "demo"\n')
     monkeypatch.chdir(tmp_path)
     code, data = run_cli_json("validate")
-    assert code == 3 and data["error"]["code"] == "old_manifest"
-    assert "Rename app.toml to project.toml" in data["error"]["hint"]
+    assert code == 3 and data["error"]["code"] == "not_a_project"
+    assert "holds an app (its app.toml), not a project" in data["error"]["message"]
     code, data = run_cli_json("validate", "--project-dir", str(tmp_path))
-    assert code == 3 and data["error"]["code"] == "old_manifest"
+    assert code == 3 and data["error"]["code"] == "not_a_project"
 
 
-def test_project_dir_and_its_old_name(demo_app, tmp_path, monkeypatch):
+def test_project_dir_and_its_other_spelling(demo_app, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     for opt in ("--project-dir", "--app-dir"):
         code, data = run_cli_json("data", "list", opt, str(demo_app.app_dir))

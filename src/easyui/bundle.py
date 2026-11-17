@@ -23,8 +23,9 @@ query sandbox (``sandbox.HEAP_LIMIT``, with ``temp_store = MEMORY``, so sorting
 never spills into files); and the copy stops after ``BUILD_TIME_LIMIT_S``
 (``DataBuildError``). This reading runs in the easy-ui process itself (not in a
 killable worker): the authorizer, the time limit and the memory cap are its limits.
-``describe_tables`` (``easy-ui tables``) reads the same way, with a time limit of
-``DESCRIBE_TIME_LIMIT_S`` (60 s) and the same memory cap. The new file may grow to at most
+``describe_tables`` (``easy-ui tables``) reads the same way (the same authorizer, letting it read every table
+and view of the file; one that uses anything else is listed with ``refused`` and not read), with a time limit
+of ``DESCRIBE_TIME_LIMIT_S`` (60 s) and the same memory cap. The new file may grow to at most
 ``2 x`` the project's file (at least ``MIN_SIZE_LIMIT``). Indexes are made
 again from their column lists (never by running the SQL stored in the
 project's file); indexes on expressions and partial indexes are left out.
@@ -58,7 +59,8 @@ Public API
 ``bundle_info(path) -> dict``
     The JSON description written next to a bundle (``{}`` when missing).
 ``describe_tables(db_path, *, samples=3, only=None, immutable=True, samples_for=None) -> list[dict]``
-    ``[{"name", "kind", "rows", "columns": [{"name", "type", "samples": [...]}]}]``
+    ``[{"name", "kind", "rows", "columns": [{"name", "type", "samples": [...]}]}]``; a table or view that uses
+    anything but plain reading has ``rows: None``, no columns and ``refused`` (why, in plain words).
     for the CLI ``tables`` command. ``only`` limits it to those names; ``samples_for`` (names) gives
     sample values only for those tables (the others get ``"samples_hidden": true``).
 ``table_change(before, after) -> {"added", "removed"}``  compares two lists of table names.
@@ -367,6 +369,31 @@ def prune(where: AppConfig | paths.StatePaths, keep: int = DEFAULT_KEEP) -> list
 DESCRIBE_TIME_LIMIT_S = 60.0
 
 
+def _describe_one(conn: sqlite3.Connection, name: str, kind: str, samples: int, show: set[str] | None) -> dict[str, Any]:
+    types = {r[1]: r[2] for r in conn.execute("SELECT * FROM pragma_table_info(?)", (name,))}
+    cur = conn.execute(f"SELECT * FROM {_q(name)} LIMIT 0")
+    cols = [d[0] for d in cur.description or ()]
+    columns = []
+    hidden = show is not None and _lower(name) not in show
+    for col in cols:
+        vals: list[Any] = []
+        if samples > 0 and not hidden:
+            for (v,) in conn.execute(
+                f"SELECT DISTINCT {_q(col)} FROM {_q(name)} WHERE {_q(col)} IS NOT NULL LIMIT ?", (samples,)
+            ):
+                if isinstance(v, (bytes, bytearray)):
+                    v = f"<{len(v)} bytes>"
+                elif isinstance(v, str) and len(v) > 60:
+                    v = v[:57] + "..."
+                vals.append(v)
+        columns.append({"name": col, "type": types.get(col) or "", "samples": vals})
+    count = conn.execute(f"SELECT count(*) FROM {_q(name)}").fetchone()[0]
+    entry: dict[str, Any] = {"name": name, "kind": kind, "rows": count, "columns": columns}
+    if hidden:
+        entry["samples_hidden"] = True
+    return entry
+
+
 def describe_tables(
     db_path: str | Path,
     *,
@@ -376,41 +403,33 @@ def describe_tables(
     samples_for: list[str] | tuple[str, ...] | set[str] | None = None,
 ) -> list[dict[str, Any]]:
     conn = _connect_ro(Path(db_path), immutable=immutable)
-    deadline = time.monotonic() + DESCRIBE_TIME_LIMIT_S
-    conn.set_progress_handler(lambda: 1 if time.monotonic() > deadline else 0, 10_000)
+    # The same read-only authorizer as data build: only reading, no function on sandbox.DENIED_FUNCTIONS, no
+    # other pragma than the column and index lists. Every table and view of the file may be listed here.
+    guard = _SourceGuard((), DESCRIBE_TIME_LIMIT_S)
+    conn.set_authorizer(guard.authorize)
+    conn.set_progress_handler(guard.progress, 10_000)
     show = {_lower(n) for n in samples_for} if samples_for is not None else None
     try:
         rows = conn.execute(
             "SELECT name, type FROM sqlite_schema WHERE type IN ('table', 'view') "
             "AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name"
         ).fetchall()
+        guard.allowed = {_lower(name) for name, _kind in rows}
         wanted = {n.lower() for n in only} if only is not None else None
         out = []
         for name, kind in rows:
             if wanted is not None and name.lower() not in wanted:
                 continue
-            types = {r[1]: r[2] for r in conn.execute("SELECT * FROM pragma_table_info(?)", (name,))}
-            cur = conn.execute(f"SELECT * FROM {_q(name)} LIMIT 0")
-            cols = [d[0] for d in cur.description or ()]
-            columns = []
-            hidden = show is not None and _lower(name) not in show
-            for col in cols:
-                vals: list[Any] = []
-                if samples > 0 and not hidden:
-                    for (v,) in conn.execute(
-                        f"SELECT DISTINCT {_q(col)} FROM {_q(name)} WHERE {_q(col)} IS NOT NULL LIMIT ?", (samples,)
-                    ):
-                        if isinstance(v, (bytes, bytearray)):
-                            v = f"<{len(v)} bytes>"
-                        elif isinstance(v, str) and len(v) > 60:
-                            v = v[:57] + "..."
-                        vals.append(v)
-                columns.append({"name": col, "type": types.get(col) or "", "samples": vals})
-            count = conn.execute(f"SELECT count(*) FROM {_q(name)}").fetchone()[0]
-            entry: dict[str, Any] = {"name": name, "kind": kind, "rows": count, "columns": columns}
-            if hidden:
-                entry["samples_hidden"] = True
-            out.append(entry)
+            try:
+                out.append(_describe_one(conn, name, kind, samples, show))
+            except sqlite3.DatabaseError as e:
+                msg = str(e).lower()
+                if not (guard.refused or "not authorized" in msg or "prohibited" in msg or "unsafe use" in msg):
+                    raise
+                what = guard.refused[0] if guard.refused else "something that is not plain reading"
+                guard.refused.clear()
+                out.append({"name": name, "kind": kind, "rows": None, "columns": [],
+                            "refused": f"it uses {what}, so easy-ui did not read it"})
         return out
     except (sqlite3.OperationalError, MemoryError) as e:
         if _out_of_memory(e):

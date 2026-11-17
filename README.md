@@ -1,6 +1,9 @@
 # my-easy-ui
 
-A small dashboard server and browser renderer for projects built with [my-easy-software](https://github.com/josep-reyero/my-easy-software). One
+> **Consumer apps should ship APIs that let people consume their own data. People then set up their own
+> dashboards and own their data, in an AI-native, fully flexible way.**
+
+A small dashboard server and browser renderer for projects built with **[my-easy-software](https://github.com/josep-reyero/my-easy-software)**. One
 server process serves one project.
 
 ## The idea
@@ -56,7 +59,7 @@ below with the demo's own folders.
 
 ## Quick start
 
-In a project folder (the one holding `project.toml`, shared with [my-easy-software](https://github.com/josep-reyero/my-easy-software)):
+In a project folder (the one holding `project.toml`, shared with **[my-easy-software](https://github.com/josep-reyero/my-easy-software)**):
 
 ```toml
 # project.toml
@@ -77,18 +80,19 @@ refresh_after = ["fitness-garmin.sync"]  # optional, read by mes: jobs after whi
 ```
 
 `easy-ui` reads `[project]`, `[ui]` and the names of `[tables]` and `[views]`; the rest belongs
-to [my-easy-software](https://github.com/josep-reyero/my-easy-software). The data is the
+to **[my-easy-software](https://github.com/josep-reyero/my-easy-software)**. The data is the
 project's shared database, `<data folder>/<project>.sqlite`. Dashboards read the shared tables
 (through their merged views), the `[views]` and each app's `[ui] tables`, and nothing else.
-Older forms (`[apps.*]`, `[jobs.*]`, `[ui] data`, a root `app.toml`) get a message saying what
-to change.
+A setting easy-ui does not know is refused with the closest correct name, or with where it
+belongs (jobs, for example, go in the app's own `app.toml`).
 
 Each app is a folder with an `app.toml` (in the project's `apps/<package>/`, or installed
 elsewhere and found through `apps.lock.json`, which `mes apps sync` writes). An app's
 `[ui] dashboards` are files in its `dashboards/` folder; `[ui.contributes.<dashboard>]` names a
 sections file whose sections easy-ui places in another dashboard (at its start, its end, or after
 one of its anchors); its `styles/`, `assets/` and `themes/` folders work like the project's, and
-its stylesheets apply only to what it contributes. The project has the last word:
+its stylesheets apply only to its own dashboards (sections other apps place in them included)
+and to the sections it adds elsewhere. The project has the last word:
 `ui/dashboards/<name>.yaml` replaces an app's dashboard of that name, and
 `ui/sections/<app>.<dashboard>.yaml` replaces (or, with `sections: []`, removes) an app's
 sections. `easy-ui dashboards` shows where each piece comes from and what overrides what.
@@ -190,7 +194,8 @@ The page keeps the key only while it is open (never in the browser's storage) an
 of the address bar, but the browser's history may still keep the whole link.
 The lock covers the dashboards' titles, texts and numbers, not the project's look: its
 stylesheets, fonts and pictures stay readable by anyone with the files (the folder or the single
-file), and the command says so.
+file), and the command says so. The size of the locked data is not hidden either: anyone with
+the files can tell roughly how much the copy holds (a few rows or years of them).
 
 **Pictures for agents.** `easy-ui screenshot [DASHBOARD] --out FILE.png [--phone] [--dark]`
 draws the working dashboards (or `--published`) in a headless Chromium-based browser already
@@ -226,7 +231,7 @@ name (its RP ID) and keep it: a passkey made on `http://localhost:8765` works on
 `http://localhost` at any port, one made on `https://myserver.example.ts.net` only there.
 
 Every command accepts `--json` (only JSON on stdout, errors as JSON), `--project-dir PATH` (the
-folder holding `project.toml`; `--app-dir` still works), `--ui-dir PATH` (the ui folder alone,
+folder holding `project.toml`), `--ui-dir PATH` (the ui folder alone,
 as the web account uses it) and `--auth-dir PATH` (the sign-in folder), before or after the command. Commands that run until stopped (`serve`, `preview`) still print their
 result when stopped with Ctrl-C or SIGTERM. Exit codes: 0 ok, 1 error, 2 usage, 3 not found, 4
 not allowed, 5 refused for safety, 6 needs you, 75 try again later.
@@ -267,21 +272,20 @@ On your own computer:
 - Sample data for the preview: `ui/fixtures/*.sqlite`, `*.sqlite3` or `*.db` in the project
   (made-up data only), used when the project has no data yet or with `easy-ui preview --fixture`.
 
-On a server (`MES_ROOT=/var/lib/mes`, set by [my-easy-software](https://github.com/josep-reyero/my-easy-software) for its jobs):
+On a server (`MES_ROOT=/var/lib/mes`, set by **[my-easy-software](https://github.com/josep-reyero/my-easy-software)** for its jobs):
 
 | Folder | Owner : group | Mode | Why |
 | --- | --- | --- | --- |
 | `/var/lib/mes/<p>` | `root` : `root` | 0711 | only root may add, rename or replace what is in it |
-| `/var/lib/mes/<p>/data` | ([my-easy-software](https://github.com/josep-reyero/my-easy-software)) | | the project's own data; the web account cannot enter |
+| `/var/lib/mes/<p>/data` | (**[my-easy-software](https://github.com/josep-reyero/my-easy-software)**) | | the project's own data; the web account cannot enter |
 | `/var/lib/mes/<p>/ui`, `ui/data`, `ui/specs` | `mes-<p>` : `mes-<p>-web` | 2750 | written by the jobs (`data build`, `publish`), read by the web account |
 | `/var/lib/mes/<p>/auth` | `mes-<p>-web` : `mes-<p>-web` | 0700 | the sign-in, written only by the web account; beside `ui/`, never inside it |
 
 `data build` and `publish` keep what they write readable by that group whatever the umask. The
 web account reads everything under `ui/` without following links, because the project's account
-writes that folder. An older layout kept the sign-in in `ui/auth/`; that folder is not moved or
-read (the project's account could have changed it, so it cannot be trusted): after upgrading,
-set the password and add the passkeys again (on a personal machine too: the sign-in folder moved
-from `ui/auth/` to beside `ui/`). The
+writes that folder. The sign-in folder is always beside `ui/`, never inside it, on a personal
+machine too: easy-ui never reads sign-in data from inside `ui/`, which the project's account
+could change. The
 service sees nothing else under `/var/lib/mes` (it is hidden from it), and `easy-ui` itself must
 be installed outside `/var/lib/mes` and outside home folders (for example `/usr/local/bin`).
 
@@ -338,9 +342,9 @@ WebAuthn library) and tested against a recorded browser ceremony.
 
 This is one piece of a small family of projects that work together or on their own:
 
-- [my-easy-software](https://github.com/josep-reyero/my-easy-software): the framework: create, run, deploy and share small personal projects with the `mes` command.
-- [my-bucket-storage](https://github.com/josep-reyero/my-bucket-storage): storage: a small object store with no server process that takes little disk space.
-- [fitdata](https://github.com/josep-reyero/fitdata): the first project built this way: a personal Garmin data archive with a command line for agents.
+- **[my-easy-software](https://github.com/josep-reyero/my-easy-software)**: the framework: create, run, deploy and share small personal projects with the `mes` command.
+- **[my-bucket-storage](https://github.com/josep-reyero/my-bucket-storage)**: storage: a small object store with no server process that takes little disk space.
+- **[fitdata](https://github.com/josep-reyero/fitdata)**: the first project built this way: a personal Garmin data archive with a command line for agents.
 
 ## License
 

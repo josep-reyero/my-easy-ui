@@ -63,7 +63,7 @@ def test_an_svg_is_only_ever_a_picture(look_env):
     login(c)
     r = c.get("/ui/assets/logo.svg")
     assert r.status_code == 200 and r.content == SVG
-    assert r.headers["content-type"].startswith("image/svg+xml")
+    assert r.headers["content-type"] == "image/svg+xml; charset=utf-8"
     policies = r.headers.get_list("content-security-policy")
     assert any("sandbox" in p and "default-src 'none'" in p for p in policies)
     assert r.headers["content-disposition"].startswith("attachment")
