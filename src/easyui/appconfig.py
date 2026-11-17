@@ -88,7 +88,7 @@ from typing import Any
 from easyui import paths
 from easyui.errors import ConfigError, NotFound
 
-TOP_KEYS = ("project", "tables", "views", "settings", "ui", "storage")
+TOP_KEYS = ("project", "tables", "views", "settings", "ui", "storage", "backup")
 PROJECT_KEYS = ("name", "title", "version", "apps")
 UI_KEYS = ("accent", "dashboards", "tables", "refresh_after")
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}\Z")

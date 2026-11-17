@@ -1,4 +1,4 @@
-"""systemd units that run one project's dashboard server on a server you own (contract section 3).
+"""systemd units that run one project's dashboard server on a server you own (the design, "Accounts on a server").
 
 ``easy-ui units --render-only [--out DIR]`` writes (or prints) two **system** units:
 
