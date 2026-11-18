@@ -8,12 +8,13 @@
 
 export const NULL_TEXT = "—";
 export const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-export const FORMAT_NAMES = ["number", "integer", "decimal1", "percent", "duration", "distance", "date", "datetime", "pace"];
-const NUMERIC_FORMATS = new Set(["number", "integer", "decimal1", "percent", "duration", "distance", "pace"]);
+export const FORMAT_NAMES = ["number", "integer", "decimal1", "percent", "duration", "distance", "date", "datetime", "pace", "clock"];
+const NUMERIC_FORMATS = new Set(["number", "integer", "decimal1", "percent", "duration", "distance", "pace", "clock"]);
 
 const NUMERIC_TEXT = /^-?\d+(\.\d+)?$/;
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})/;
 const ISO_DATETIME = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/;
+const TIME_TEXT = /^(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?$/;
 
 // ---- exact arithmetic ---------------------------------------------------
 
@@ -67,6 +68,28 @@ function group({ neg, q }, places, trim = false) {
   parts.unshift(whole);
   const out = parts.join(",") + (frac ? `.${frac}` : "");
   return (neg && q !== 0n ? "-" : "") + out; // a value that rounds to zero has no minus sign
+}
+
+// A number of seconds as whole minutes, half a minute away from zero, exactly (BigInt).
+function minutesOf(x) {
+  const { neg, mant, exp } = decompose(x);
+  let q;
+  if (exp >= 0) {
+    const v = mant << BigInt(exp);
+    q = v / 60n;
+    if (2n * (v % 60n) >= 60n) q += 1n;
+  } else {
+    const d = 60n << BigInt(-exp);
+    q = mant / d;
+    if (2n * (mant % d) >= d) q += 1n;
+  }
+  return neg ? -q : q;
+}
+
+// A time of day from seconds after midnight, wrapping around the day: "23:10".
+function timeOfDay(x) {
+  const m = ((minutesOf(x) % 1440n) + 1440n) % 1440n;
+  return `${String(m / 60n).padStart(2, "0")}:${String(m % 60n).padStart(2, "0")}`;
 }
 
 function signedInt(r) {
@@ -171,6 +194,12 @@ export function formatValue(fmt, value) {
   }
   if (value === null || value === undefined) return NULL_TEXT;
   if (fmt === "date" || fmt === "datetime") return formatDate(fmt, value);
+  if (fmt === "clock" && typeof value === "string") {
+    const mt = ISO_DATETIME.exec(value);
+    if (mt) return `${mt[4]}:${mt[5]}`;
+    const t = TIME_TEXT.exec(value.trim());
+    if (t && Number(t[1]) < 24 && Number(t[2]) < 60) return `${t[1].padStart(2, "0")}:${t[2]}`;
+  }
 
   const n = asNumber(value);
   if (n === null) {
@@ -192,6 +221,7 @@ export function formatValue(fmt, value) {
     if (secs <= 0n) return NULL_TEXT;
     return `${clock(secs)} /km`;
   }
+  if (fmt === "clock") return timeOfDay(n);
   throw new Error(`unhandled format ${fmt}`);
 }
 
@@ -229,6 +259,7 @@ function trimmed(x, places) {
 // One short form for a whole axis, chosen from its largest value, so the
 // labels read 15k, 10k, 5k, 0 rather than 15k, 10k, 5,000, 0.
 function compact(v, max) {
+  if (v === 0) return "0"; // not "0k"
   const a = Math.abs(max ?? v);
   if (a >= 1e9) return `${trimmed(v / 1e9, 1)}B`;
   if (a >= 1e6) return `${trimmed(v / 1e6, 1)}M`;
@@ -247,6 +278,8 @@ export function axisFormatter(fmt, max) {
       return max >= 3600 ? (v) => `${trimmed(v / 3600, 1)} h` : (v) => `${trimmed(v / 60, 0)} min`;
     case "pace":
       return (v) => (v > 0 ? clock(signedInt(roundExact(v, 0))) : "");
+    case "clock":
+      return (v) => timeOfDay(v);
     default:
       return (v) => compact(v, max);
   }

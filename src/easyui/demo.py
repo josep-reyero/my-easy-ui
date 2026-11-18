@@ -143,7 +143,8 @@ sections:
     queries:
       sleep_nightly:
         sql: |
-          SELECT night, round(asleep_s / 3600.0, 2) AS "Hours asleep"
+          SELECT night, round(asleep_s / 3600.0, 2) AS "Hours asleep",
+                 round(avg(asleep_s) OVER (ORDER BY night ROWS 6 PRECEDING) / 3600.0, 2) AS "7-night average"
           FROM sleep_nights WHERE night >= :since ORDER BY night
       sleep_average:
         sql: |
@@ -155,7 +156,9 @@ sections:
           title: Sleep per night
           query: sleep_nightly
           x: night
-          y: Hours asleep
+          y: [Hours asleep, 7-night average]
+          dashed: [7-night average]
+          reference: {value: 8, label: Goal}
           format: decimal1
           unit: h
         - type: stat
@@ -208,7 +211,11 @@ queries:
       FROM days WHERE day >= :since
       GROUP BY 1 ORDER BY 1
   heart:
-    sql: SELECT day, resting_hr AS "Resting heart rate" FROM days WHERE day >= :since ORDER BY day
+    sql: |
+      SELECT day, resting_hr AS "Resting heart rate",
+             round(avg(resting_hr) OVER (ORDER BY day ROWS 27 PRECEDING) - 4, 1) AS usual_low,
+             round(avg(resting_hr) OVER (ORDER BY day ROWS 27 PRECEDING) + 4, 1) AS usual_high
+      FROM days WHERE day >= :since ORDER BY day
 layout:
   - - type: controls
   - - type: stat
@@ -240,6 +247,7 @@ layout:
       x: day
       y: [Resting heart rate]
       unit: bpm
+      band: {low: usual_low, high: usual_high}
   - - type: text
       body: |
         ## About this page
@@ -287,6 +295,12 @@ queries:
       GROUP BY kind ORDER BY kind
   weekly:
     sql: SELECT week, distance_m AS "Distance" FROM weekly ORDER BY week
+  latest:
+    sql: |
+      SELECT start, datetime(start, '+' || duration_s || ' seconds') AS until, kind
+      FROM activities
+      WHERE day > (SELECT date(max(day), '-14 days') FROM activities) AND (:kind = 'all' OR kind = :kind)
+      ORDER BY start
 layout:
   - - type: controls
       title: Filter
@@ -309,6 +323,7 @@ layout:
       y: [Distance]
       format: distance
       stacked: false
+      colors_by: kind
     - type: area
       title: Weekly distance
       query: weekly
@@ -316,6 +331,13 @@ layout:
       y: Distance
       format: distance
       partial: last
+  - - type: timeline
+      title: The last two weeks
+      query: latest
+      start: start
+      end: until
+      category: kind
+      order: [run, ride, walk, swim]
 """
 
 

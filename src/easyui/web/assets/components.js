@@ -126,7 +126,16 @@ export class Frame {
     }
     this.hasContent = true;
     this.el.classList.remove("is-empty", "is-error", "eui-empty", "eui-error");
+    this.setHidden(false);
     this.render({ columns, rows, truncated: Boolean(result.truncated) });
+  }
+
+  /** hide_empty: the component leaves the page while it has nothing to show, and its row closes up. */
+  setHidden(hide) {
+    const want = Boolean(hide && this.comp.hide_empty);
+    if (this.el.hidden === want) return;
+    this.el.hidden = want;
+    if (typeof this.ctx.relayout === "function") this.ctx.relayout();
   }
 
   requiredColumns() {
@@ -149,6 +158,7 @@ export class Frame {
   showEmpty() {
     this.hasContent = false;
     this.disposeContent();
+    this.setHidden(true);
     this.el.classList.remove("is-error", "eui-error");
     this.el.classList.add("is-empty", "eui-empty");
     const reset = this.ctx.queryHasControls(this.comp.query) && this.ctx.paramsDiffer()
@@ -171,6 +181,7 @@ export class Frame {
 
   setError(err) {
     this.done();
+    this.setHidden(false);
     this.hasContent = false;
     this.disposeContent();
     this.el.classList.remove("is-empty", "eui-empty");
@@ -218,7 +229,7 @@ export class Stat extends Frame {
   }
 
   requiredColumns() {
-    return [this.comp.value, this.comp.delta];
+    return [this.comp.value, this.comp.delta, this.comp.note];
   }
 
   loadingView() {
@@ -262,8 +273,16 @@ export class Stat extends Frame {
         }
       }
     }
+    if (this.comp.note) {
+      const note = row[columns.indexOf(this.comp.note)];
+      if (note !== null && note !== undefined && String(note).trim()) {
+        out.push(h("p", { class: "stat-note eui-note", text: display(null, note) }));
+      }
+    }
     if (this.hint) out.push(this.hint);
     fill(this.body, out);
+    // Nothing to show: the value is missing (hide_empty leaves such a number out).
+    this.setHidden(value === null || value === undefined);
   }
 
   showEmpty() {

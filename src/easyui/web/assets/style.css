@@ -51,7 +51,10 @@
   --eui-size-display: clamp(2rem, 1.35rem + 2.3vw, 2.875rem);
   --eui-size-figure: clamp(2.375rem, 1.7rem + 2.4vw, 3.375rem);
 
-  --gutter: clamp(16px, 4vw, 44px);
+  --gutter: clamp(16px, 3.4vw, 64px);
+  /* the page's sides: the gutter, or more where a phone's rounded corners or notch need it */
+  --edge-left: max(var(--gutter), env(safe-area-inset-left, 0px));
+  --edge-right: max(var(--gutter), env(safe-area-inset-right, 0px));
   --eui-gap: clamp(16px, 2.2vw, 28px);
   --eui-row-gap: clamp(28px, 3.6vw, 44px);
   --eui-radius: 14px;
@@ -62,7 +65,9 @@
   --eui-card-shadow: inset 0 0 0 1px color-mix(in srgb, var(--eui-border) 55%, transparent);
   --eui-card-padding: var(--eui-pad);
 
-  --eui-chart-height: clamp(196px, 22vw, 264px);
+  /* By the chart's own width (cqi: a hundredth of its component's width): taller on wide screens up to a cap,
+     never squashed on a phone, and never taller than about two thirds of a short (landscape) screen. */
+  --eui-chart-height: clamp(200px, 20cqi + 112px, min(420px, 66svh));
   --eui-chart-line-width: 2;
   --eui-chart-grid-style: solid;
   --eui-chart-area-opacity: 0.16;
@@ -72,6 +77,9 @@
   --eui-chart-label: var(--eui-muted);
   --eui-chart-axis: var(--eui-border);
   --eui-chart-grid: var(--eui-grid);
+  --eui-chart-band-opacity: 0.14;
+  --eui-chart-reference: var(--eui-muted);
+  --eui-chart-tooltip-shadow: 0 0 0 1px var(--eui-border), 0 10px 28px -10px color-mix(in srgb, var(--eui-text) 32%, transparent);
 
   --field: var(--eui-surface);
   --field-line: #c9d0d8;
@@ -98,6 +106,7 @@
     --own-ink: #e8ebef;
     --own-paper: #1d222a;
     --own-accent: #8fb3e6;
+    --eui-chart-band-opacity: 0.22;
     color-scheme: dark;
   }
 }
@@ -323,13 +332,14 @@ a {
   top: 10px;
 }
 
+/* The page uses the whole width it is given, from a 320 px phone to an ultrawide screen; prose keeps a
+   readable measure on its own (.prose, .dash-desc). */
 .top-inner,
 .main {
   width: 100%;
-  max-width: 76rem;
   margin: 0 auto;
-  padding-left: var(--gutter);
-  padding-right: var(--gutter);
+  padding-left: var(--edge-left);
+  padding-right: var(--edge-right);
 }
 
 .top-inner {
@@ -419,6 +429,92 @@ a {
   color: var(--eui-muted);
 }
 
+/* The menu button: shown only when the links do not fit across (app.js sets .is-collapsed). */
+.nav {
+  position: relative;
+}
+
+.nav-toggle {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 40px;
+  margin-left: -10px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: none;
+  color: var(--eui-text);
+  font-size: 0.9375rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.nav-toggle:hover {
+  background: var(--eui-grid);
+}
+
+.nav-toggle-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nav-toggle .icon {
+  width: 16px;
+  height: 16px;
+  color: var(--eui-muted);
+  transition: transform 0.15s ease;
+}
+
+.nav.is-collapsed .nav-toggle {
+  display: inline-flex;
+}
+
+.nav.is-collapsed .nav-list {
+  display: none;
+}
+
+.nav.is-collapsed.is-open .nav-toggle .icon {
+  transform: rotate(180deg);
+}
+
+.nav.is-collapsed.is-open .nav-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  position: absolute;
+  top: calc(100% + 6px);
+  left: -10px;
+  z-index: 20;
+  min-width: min(18rem, calc(100vw - 2 * var(--gutter)));
+  max-height: min(70vh, 30rem);
+  overflow-y: auto;
+  padding: 6px;
+  border-radius: 12px;
+  background: var(--eui-surface);
+  box-shadow: var(--eui-chart-tooltip-shadow);
+}
+
+.nav.is-collapsed.is-open .nav-link {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 8px 12px;
+  border-bottom: 0;
+  border-radius: 8px;
+}
+
+.nav.is-collapsed.is-open .nav-link:hover {
+  background: var(--eui-grid);
+}
+
+.nav.is-collapsed.is-open .nav-link[aria-current="page"] {
+  background: var(--eui-accent-soft);
+  font-weight: 500;
+}
+
 .export-badge {
   border-style: solid;
   border-color: color-mix(in srgb, var(--own-ink) 25%, transparent);
@@ -456,7 +552,7 @@ a {
 }
 
 .main {
-  padding-bottom: 72px;
+  padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px));
 }
 
 .main:focus {
@@ -471,9 +567,7 @@ a {
   .nav {
     order: 3;
     flex-basis: 100%;
-    margin: 0 calc(-1 * var(--gutter));
-    padding: 0 var(--gutter);
-    overflow: hidden;
+    margin: 0;
   }
 }
 
@@ -569,6 +663,11 @@ a {
   margin-top: clamp(24px, 3.4vw, 40px);
 }
 
+/* A row shows its components side by side when they fit, at least --basis wide each (set per row from the
+   kinds of component in it). dashboard.js measures the rows and sets --item-basis to an even share: as
+   many across as fit, the components spread over balanced lines (6 numbers: 6, 3 + 3 or 2 + 2 + 2; 3 charts:
+   3, or 2 + 1 with the last one as wide as the line). Every component is a size container, so what is in it
+   (chart height, table cards, figure size, controls) follows its own width, not the screen's. */
 .row {
   display: flex;
   flex-wrap: wrap;
@@ -577,8 +676,12 @@ a {
 }
 
 .row > .c {
-  flex: 1 1 var(--basis, 18rem);
+  flex: 1 1 var(--item-basis, var(--basis, 18rem));
   min-width: 0;
+}
+
+.c {
+  container-type: inline-size;
 }
 
 .row-controls > .c {
@@ -589,23 +692,13 @@ a {
   margin-top: calc(-0.35 * var(--eui-row-gap));
 }
 
-/* On a phone, rows of numbers become an even two-column grid (never 2 + 1 alone). */
-@media (max-width: 560px) {
-  .row-stats {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 20px 16px;
-  }
+.row-stats {
+  row-gap: max(20px, calc(var(--eui-gap) * 0.9));
+}
 
-  .row-stats > .c:last-child:nth-child(odd) {
-    grid-column: 1 / -1;
-  }
-
-  .row-stats .stat-value {
-    font-size: clamp(1.625rem, 8.4vw, 2.375rem);
-  }
-
-  .row-stats .stat-hint {
+/* A narrow number tile (two across on a phone): a smaller hint. */
+@container (max-width: 200px) {
+  .stat-hint {
     font-size: var(--eui-size-xs);
   }
 }
@@ -697,6 +790,26 @@ a {
   margin-top: 12px;
 }
 
+/* An empty chart keeps its place and reads as a chart with nothing in it: faint gridlines behind the note. */
+.c-line .state-empty,
+.c-area .state-empty,
+.c-bar .state-empty {
+  align-items: center;
+  max-width: none;
+  padding: 0 16px;
+  text-align: center;
+  background-image: repeating-linear-gradient(to bottom, transparent 0, transparent calc(25% - 1px), var(--eui-grid) calc(25% - 1px), var(--eui-grid) 25%);
+  background-position: 0 1px;
+}
+
+.c-line .state-empty > *,
+.c-area .state-empty > *,
+.c-bar .state-empty > * {
+  max-width: 40ch;
+  padding: 0 10px;
+  background: var(--eui-card-background);
+}
+
 .panel .state-error {
   min-height: calc(var(--eui-chart-height) * 0.6);
 }
@@ -763,7 +876,8 @@ a {
   margin-top: 8px;
   line-height: 1.1;
   font-family: var(--eui-font-numbers);
-  font-size: var(--eui-size-figure);
+  /* the figure fits its tile: at most the figure size, smaller in a narrow tile */
+  font-size: min(var(--eui-size-figure), 18cqi + 0.25rem);
   font-weight: 300;
   letter-spacing: -0.022em;
 }
@@ -829,6 +943,13 @@ a {
   color: var(--eui-bad);
 }
 
+.stat-note {
+  margin-top: 6px;
+  color: var(--eui-text);
+  font-size: var(--eui-size-s);
+  font-weight: 500;
+}
+
 .stat-hint {
   margin-top: 8px;
   color: var(--eui-muted);
@@ -869,13 +990,142 @@ a {
   white-space: nowrap;
 }
 
+.readout-band {
+  margin-top: 1px;
+  color: var(--eui-muted);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .readout:empty {
   display: none;
 }
 
+.chart-stage {
+  position: relative;
+  margin: 14px -4px 0;
+}
+
 .chart {
   height: var(--eui-chart-height);
-  margin: 12px -4px 0;
+}
+
+/* Charts side by side line up: a chart in a shorter panel (no legend, a one-line readout) grows a little
+   to fill its row, and "View as table" sits at the bottom of every panel. */
+.c-line.panel,
+.c-area.panel,
+.c-bar.panel,
+.c-timeline.panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.c-line > .c-body,
+.c-area > .c-body,
+.c-bar > .c-body,
+.c-timeline > .c-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+.c-line .chart-stage,
+.c-area .chart-stage,
+.c-bar .chart-stage {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+.c-line .chart,
+.c-area .chart,
+.c-bar .chart {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: var(--eui-chart-height);
+  max-height: calc(var(--eui-chart-height) * 1.3);
+}
+
+.c-line .c-foot,
+.c-area .c-foot,
+.c-bar .c-foot,
+.c-timeline .c-foot {
+  margin-top: auto;
+  padding-top: 6px;
+}
+
+/* A timeline is as tall as its lanes need. */
+.chart-timeline {
+  height: calc(var(--lanes, 4) * 2.25rem + 2.5rem);
+}
+
+.sk-timeline {
+  height: 10rem;
+  margin-top: 8px;
+  border-radius: 10px;
+  opacity: 0.6;
+}
+
+/* The chart is SVG, so its text takes the page's type: figures of equal width, the page's smoothing. */
+.chart text {
+  font-variant-numeric: tabular-nums lining-nums;
+  font-kerning: normal;
+}
+
+/* The hover card of a chart with several series: a small panel beside the pointer. */
+.chart-card {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 2;
+  min-width: 9rem;
+  max-width: min(18rem, 80%);
+  padding: 8px 12px 9px;
+  border-radius: var(--eui-radius-small);
+  background: var(--eui-surface);
+  box-shadow: var(--eui-chart-tooltip-shadow);
+  color: var(--eui-text);
+  font-size: var(--eui-size-xs);
+  line-height: 1.35;
+  pointer-events: none;
+}
+
+.card-at {
+  margin-bottom: 5px;
+  color: var(--eui-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.card-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.card-row + .card-row {
+  margin-top: 3px;
+}
+
+.card-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-value {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.card-total {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px solid var(--eui-grid);
 }
 
 .legend {
@@ -905,6 +1155,41 @@ a {
   height: 10px;
   border-radius: 3px;
   background: var(--swatch, var(--eui-accent));
+}
+
+/* Lines are keyed with a short line, bars with a square, a band with a soft block, a reference with a dash. */
+.legend[data-kind="line"] .swatch,
+.legend[data-kind="area"] .swatch,
+.chart-card .swatch {
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+}
+
+.legend .swatch-band {
+  width: 14px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.legend .swatch-dashed,
+.chart-card .swatch-dashed {
+  height: 0;
+  border-top: 2.5px dashed var(--swatch);
+  border-radius: 0;
+  background: none;
+}
+
+.legend .swatch-reference {
+  width: 14px;
+  height: 0;
+  border-top: 1.5px dashed var(--swatch);
+  border-radius: 0;
+  background: none;
+}
+
+.swatch-none {
+  visibility: hidden;
 }
 
 .legend-name {
@@ -1016,9 +1301,10 @@ td.is-null {
   color: var(--eui-muted);
 }
 
-/* Tables on phones (phone: cards, the default): each row is a small card of "label  value" lines, the
-   first column as its heading. No sideways scrolling; sorting is a wide-screen feature. */
-@media (max-width: 560px) {
+/* Tables in a narrow component (phone: cards, the default): each row is a small card of "label  value"
+   lines, the first column as its heading. No sideways scrolling; sorting is a wide-screen feature. The
+   component's own width decides (a table in half of a wide screen gets cards too). */
+@container (max-width: 560px) {
   .t-cards {
     overflow-x: visible;
   }
@@ -1307,7 +1593,7 @@ input[type="date"].input {
   font-size: var(--eui-size-s);
 }
 
-@media (max-width: 520px) {
+@container (max-width: 520px) {
   .controls > .field {
     flex: 1 1 100%;
   }

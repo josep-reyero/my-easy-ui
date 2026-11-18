@@ -35,6 +35,7 @@ import datetime as _dt
 import math
 import re
 from decimal import ROUND_HALF_UP, Decimal
+from fractions import Fraction
 from typing import Any
 
 NULL_TEXT = "—"
@@ -89,12 +90,21 @@ FORMATS: dict[str, dict[str, Any]] = {
         "input": "number of seconds per kilometre",
         "examples": [[312, "5:12 /km"], [299.6, "5:00 /km"], [0, NULL_TEXT]],
     },
+    "clock": {
+        "description": "A time of day on a 24-hour clock, such as 23:10 (to the minute). A number counts seconds "
+        "after midnight and wraps around the day, so a bedtime after midnight can be written as 90000 (01:00) to "
+        "average it with ones before; text with a time in it shows that time.",
+        "input": "number of seconds after midnight, or text HH:MM[:SS] or YYYY-MM-DD HH:MM[:SS]",
+        "examples": [[83400, "23:10"], [90000, "01:00"], [-1800, "23:30"], [25229.5, "07:00"], [0, "00:00"],
+                     ["2026-03-14T07:05:09Z", "07:05"], ["6:30", "06:30"], ["bedtime", "bedtime"]],
+    },
 }
 FORMAT_NAMES = tuple(FORMATS)
 
 _NUMERIC_TEXT = re.compile(r"^-?\d+(\.\d+)?\Z")
 _ISO_DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})")
 _ISO_DATETIME = re.compile(r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})")
+_TIME_TEXT = re.compile(r"^(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?\Z")
 
 
 def vocabulary() -> dict[str, Any]:
@@ -204,6 +214,13 @@ def format_value(fmt: str | None, value: Any) -> str:
             return text
         return str(value)
 
+    if fmt == "clock" and isinstance(value, str):
+        mt = _ISO_DATETIME.match(value)
+        if mt:
+            return f"{mt[4]}:{mt[5]}"
+        mt = _TIME_TEXT.match(value.strip())
+        if mt and int(mt[1]) < 24 and int(mt[2]) < 60:
+            return f"{int(mt[1]):02d}:{mt[2]}"
     n = _as_number(value)
     if n is None:
         if isinstance(value, float):  # inf / nan
@@ -230,4 +247,9 @@ def format_value(fmt: str | None, value: Any) -> str:
         if secs <= 0:
             return NULL_TEXT
         return f"{_clock(secs)} /km"
+    if fmt == "clock":
+        exact = Fraction(n) / 60  # minutes, exactly; half a minute rounds away from zero
+        whole = int(abs(exact) + Fraction(1, 2))
+        minutes = (-whole if exact < 0 else whole) % 1440
+        return f"{minutes // 60:02d}:{minutes % 60:02d}"
     raise AssertionError(fmt)  # pragma: no cover

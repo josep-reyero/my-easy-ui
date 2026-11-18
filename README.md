@@ -10,7 +10,7 @@ server process serves one project.
 
 Dashboards are **disposable views**. Your data stays where it is, in your project. A dashboard is a
 short YAML file that says which data to read (a few named, read-only SQL queries) and how to show
-it (rows of fixed components: numbers, line, area and bar charts, tables, text and controls).
+it (rows of fixed components: numbers, line, area and bar charts, timelines, tables, text and controls).
 It contains no JavaScript, HTML or CSS.
 
 Because a dashboard is only a description, you or your AI agent can reshape it whenever your
@@ -200,7 +200,9 @@ the files can tell roughly how much the copy holds (a few rows or years of them)
 **Pictures for agents.** `easy-ui screenshot [DASHBOARD] --out FILE.png [--phone] [--dark]`
 draws the working dashboards (or `--published`) in a headless Chromium-based browser already
 installed on this computer (`EASYUI_CHROMIUM` picks one) and saves the whole page; no server,
-no password, no network.
+no password, no network. Pictures are taken at 2 device pixels per CSS pixel, as a high-density
+screen shows the page (a 1280 px page gives a 2560 px picture; show it at half its size);
+`--scale 1|2|3` changes that. A picture is at most 7680 pixels wide and 16384 high.
 
 **Running it for real.** Started by hand, `easy-ui serve` runs until it is stopped. On a
 server, `easy-ui units --render-only --origin https://NAME` writes the systemd socket and service
@@ -240,7 +242,7 @@ The full dashboard format, with examples, is in [docs/SPEC.md](docs/SPEC.md); th
 page is described in [docs/DESIGN.md](docs/DESIGN.md), and how a project changes it in
 [docs/STYLES.md](docs/STYLES.md).
 
-![The demo's overview dashboard](docs/screenshots/overview-desktop-light.png)
+<p><img src="docs/screenshots/overview-desktop-light.png" alt="The demo's overview dashboard" width="1280"></p>
 
 <p>
 <img src="docs/screenshots/activities-phone.png" alt="A table on a phone, each row as a card" width="260">
@@ -296,7 +298,8 @@ sandbox, publishing with versions and rollback, the server with passkeys, passwo
 codes, the browser page, themes and project stylesheets, the preview, static exports, pictures, the systemd files, and
 dashboards, sections and looks contributed by a project's apps. Known
 limits: formatting is English-style only (`1,234.5`, `14 Mar 2026`); charts space points evenly
-(one per row), which suits daily and weekly series; a browser that has never signed in can be
+(one per row; missing days and weeks of a regular daily or weekly series become gaps), which
+suits daily and weekly series; a browser that has never signed in can be
 kept from signing in *with the password* by someone on the private network who keeps sending
 wrong passwords (passkeys and recovery codes are not affected); passkeys need `localhost` or
 HTTPS and work only on the configured web addresses; a shared copy shows one set of control values. Tested with Chromium; not yet with Safari

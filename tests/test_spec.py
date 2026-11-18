@@ -76,7 +76,8 @@ def test_compiled_form():
                          "app": None}]
     assert stats[0] == {
         "id": "r1c0", "type": "stat", "title": "Distance", "query": "totals", "value": "distance",
-        "format": "distance", "delta": None, "delta_format": None, "better": None, "hint": "Walking, running and riding together.", "class": None, "app": None,
+        "format": "distance", "delta": None, "delta_format": None, "better": None, "hint": "Walking, running and riding together.", "note": None, "hide_empty": False,
+        "class": None, "app": None,
     }
     assert charts[0]["y"] == ["Distance"] and charts[0]["stacked"] is False
     assert charts[1]["unit"] == "bpm" and charts[1]["format"] is None
@@ -131,7 +132,7 @@ def test_unknown_component_setting():
     e = one_error(MINIMAL.replace("query: q", "querry: q"))
     assert e.where == "layout[0][0].querry" and e.did_you_mean == "query"
     assert e.allowed == ["type", "title", "query", "x", "y", "format", "unit", "step", "readout", "partial",
-                         "id", "class", "app"]
+                         "band", "reference", "dashed", "hide_empty", "id", "class", "app"]
 
 
 def test_missing_required_setting():
@@ -620,7 +621,7 @@ def test_run_queries_refuses_tampered_sql(bundle_path, activities):
 def test_catalog_is_complete_and_json():
     cat = spec.catalog()
     json.dumps(cat)
-    assert set(cat["components"]) == {"stat", "line", "area", "bar", "table", "text", "controls"}
+    assert set(cat["components"]) == {"stat", "line", "area", "bar", "timeline", "table", "text", "controls"}
     for name, comp in spec.COMPONENTS.items():
         assert set(cat["components"][name]["settings"]) == set(comp["settings"])
     assert set(cat["formats"]["formats"]) == set(formats.FORMAT_NAMES)
@@ -763,3 +764,147 @@ def test_partial_column_is_checked_against_the_data(built_app, bundle_path):
         """)
     entry = spec.validate_file(p, bundle=bundle_path)
     assert [e["where"] for e in entry["errors"]] == ["layout[0][0].partial"]
+
+
+# ---------------------------------------------------------------- chart additions: band, reference, dashed, ...
+
+CHART = """
+spec: easy-ui/v1
+title: T
+queries:
+  q:
+    sql: SELECT day, steps, steps AS avg7, steps - 1 AS lo, steps + 1 AS hi, 10000 AS goal, 'run' AS kind FROM days
+layout:
+  - - type: line
+      title: Steps
+      query: q
+      x: day
+      y: [steps, avg7]
+      SETTING
+"""
+
+
+def chart_with(setting: str, ctype: str = "line", y: str = "[steps, avg7]") -> str:
+    return CHART.replace("SETTING", setting).replace("type: line", f"type: {ctype}").replace("[steps, avg7]", y)
+
+
+def compiled_chart(setting: str, ctype: str = "line", y: str = "[steps, avg7]") -> dict:
+    dash = spec.loads(yaml_doc(chart_with(setting, ctype, y)), slug="t")
+    return spec.compile_dashboard(dash, today=TODAY)["layout"][0][0]
+
+
+def test_band_reference_and_dashed_compile():
+    c = compiled_chart("band: {low: lo, high: hi, label: Usual for you}\n      reference: {value: 10000, label: Goal}\n"
+                       "      dashed: [avg7]\n      hide_empty: true")
+    assert c["band"] == {"low": "lo", "high": "hi", "label": "Usual for you"}
+    assert c["reference"] == {"value": 10000, "column": None, "label": "Goal"}
+    assert c["dashed"] == ["avg7"] and c["hide_empty"] is True
+    assert compiled_chart("reference: 150")["reference"] == {"value": 150, "column": None, "label": None}
+    assert compiled_chart("reference: {column: goal, label: Step goal}")["reference"] == {
+        "value": None, "column": "goal", "label": "Step goal"}
+    # Not set: present in the compiled form as null (and false), so existing dashboards draw as before.
+    plain = compiled_chart("")
+    assert plain["band"] is None and plain["reference"] is None and plain["dashed"] is None and plain["hide_empty"] is False
+
+
+@pytest.mark.parametrize(("setting", "where", "words"), [
+    ("band: {low: lo}", "layout[0][0].band", 'no "high"'),
+    ("band: [lo, hi]", "layout[0][0].band", "{low: <column>, high: <column>}"),
+    ("band: {low: lo, high: hi, colour: red}", "layout[0][0].band.colour", "not a setting of a band"),
+    ("reference: {value: 1, column: goal}", "layout[0][0].reference", "one of the two"),
+    ("reference: {label: Goal}", "layout[0][0].reference", "one of the two"),
+    ("reference: {value: lots}", "layout[0][0].reference.value", "must be a number"),
+    ("reference: yes", "layout[0][0].reference", "a number or"),
+    ("dashed: [nosuch]", "layout[0][0].dashed[0]", "not one of this chart's y columns"),
+    ("dashed: 3", "layout[0][0].dashed", "a y column or a list"),
+    ("hide_empty: maybe", "layout[0][0].hide_empty", "true or false"),
+])
+def test_chart_additions_are_checked(setting, where, words):
+    e = one_error(chart_with(setting))
+    assert e.where == where and words in e.message, (e.where, e.message)
+
+
+def test_band_on_bars_and_colors_by_on_lines_are_not_settings():
+    e = one_error(chart_with("band: {low: lo, high: hi}", ctype="bar"))
+    assert e.where == "layout[0][0].band" and "band" not in e.allowed
+    e = one_error(chart_with("colors_by: kind"))
+    assert e.where == "layout[0][0].colors_by"
+
+
+def test_colors_by_needs_one_series():
+    assert compiled_chart("colors_by: kind", ctype="bar", y="steps")["colors_by"] == "kind"
+    e = one_error(chart_with("colors_by: kind", ctype="bar"))
+    assert e.where == "layout[0][0].colors_by" and "only one y column" in e.message
+
+
+TIMELINE = """
+spec: easy-ui/v1
+title: Sleep
+queries:
+  stages:
+    sql: SELECT '2026-03-01 23:10' AS start, '2026-03-01 23:40' AS until, 'light' AS stage
+layout:
+  - - type: timeline
+      title: Last night
+      query: stages
+      start: start
+      end: until
+      category: stage
+      order: [awake, rem, light, deep]
+"""
+
+
+def test_timeline_compiles():
+    dash = spec.loads(yaml_doc(TIMELINE), slug="sleep")
+    c = spec.compile_dashboard(dash, today=TODAY)["layout"][0][0]
+    assert c == {"id": "r0c0", "type": "timeline", "title": "Last night", "query": "stages", "start": "start",
+                 "end": "until", "category": "stage", "order": ["awake", "rem", "light", "deep"], "hide_empty": False,
+                 "class": None, "app": None}
+
+
+@pytest.mark.parametrize(("change", "where", "words"), [
+    (("      end: until\n", ""), "layout[0][0]", 'no "end"'),
+    (("order: [awake, rem, light, deep]", "order: deep"), "layout[0][0].order", "list of 1 to 12"),
+    (("order: [awake, rem, light, deep]", "order: [rem, rem]"), "layout[0][0].order", "listed twice"),
+    (("      category: stage\n", "      category: stage\n      y: x\n"), "layout[0][0].y", "not a setting of a timeline"),
+])
+def test_timeline_is_checked(change, where, words):
+    e = one_error(TIMELINE.replace(*change))
+    assert e.where == where and words in e.message, (e.where, e.message)
+
+
+def test_stat_note_and_hide_empty():
+    text = MINIMAL.replace("type: line", "type: stat").replace("      x: day\n      y: steps\n",
+                                                              "      value: steps\n      note: day\n      hide_empty: true\n")
+    c = spec.compile_dashboard(spec.loads(yaml_doc(text), slug="t"), today=TODAY)["layout"][0][0]
+    assert c["note"] == "day" and c["hide_empty"] is True
+
+
+def test_new_columns_are_checked_against_the_data(built_app, bundle_path):
+    p = write(built_app, "additions", """
+        spec: easy-ui/v1
+        title: T
+        queries:
+          q: {sql: "SELECT day, steps FROM days"}
+        layout:
+          - - {type: line, title: S, query: q, x: day, y: steps, band: {low: lo, high: steps}, reference: {column: goal}}
+            - {type: bar, title: B, query: q, x: day, y: steps, colors_by: kind}
+            - {type: timeline, title: T, query: q, start: day, end: day, category: kinds}
+            - {type: stat, title: N, query: q, value: steps, note: status}
+        """)
+    entry = spec.validate_file(p, bundle=bundle_path)
+    assert sorted(e["where"] for e in entry["errors"]) == [
+        "layout[0][0].band.low", "layout[0][0].reference.column", "layout[0][1].colors_by", "layout[0][2].category",
+        "layout[0][3].note"]
+
+
+def test_clock_format():
+    assert formats.format_value("clock", 83400) == "23:10"
+    assert formats.format_value("clock", 86400 + 3600) == "01:00"  # after midnight, written past 24 h
+    assert formats.format_value("clock", -1800) == "23:30"
+    assert formats.format_value("clock", 29.9) == "00:00" and formats.format_value("clock", 30) == "00:01"
+    assert formats.format_value("clock", "2026-03-14 06:42:10") == "06:42"
+    assert formats.format_value("clock", "7:05") == "07:05"
+    assert formats.format_value("clock", "25:00") == "25:00"  # not a time of day: shown as written
+    assert formats.format_value("clock", None) == formats.NULL_TEXT
+    assert "clock" in formats.FORMAT_NAMES

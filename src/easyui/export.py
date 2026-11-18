@@ -321,11 +321,17 @@ def _needs(compiled: dict[str, Any]) -> dict[str, tuple[set[str] | None, int | N
             cols: set[str] | None
             rows: int | None
             if kind == "stat":
-                cols, rows = {comp.get("value"), comp.get("delta")}, 1
+                cols, rows = {comp.get("value"), comp.get("delta"), comp.get("note")}, 1
             elif kind in ("line", "area", "bar"):
-                cols, rows = {comp.get("x"), *(comp.get("y") or [])}, None
+                cols, rows = {comp.get("x"), *(comp.get("y") or []), comp.get("colors_by")}, None
                 if comp.get("partial") not in (None, "last"):
                     cols.add(comp["partial"])
+                band = comp.get("band") if isinstance(comp.get("band"), dict) else {}
+                cols |= {band.get("low"), band.get("high")}
+                ref = comp.get("reference") if isinstance(comp.get("reference"), dict) else {}
+                cols.add(ref.get("column"))
+            elif kind == "timeline":
+                cols, rows = {comp.get("start"), comp.get("end"), comp.get("category")}, None
             elif kind == "table":
                 cols = {c["column"] for c in comp["columns"]} if comp.get("columns") else None
                 rows = comp.get("limit") if isinstance(comp.get("limit"), int) else None
@@ -491,6 +497,8 @@ def _component_line(comp: dict[str, Any]) -> str:
             continue
         if key == "columns" and isinstance(value, list):
             value = ", ".join(f"{c['column']} as \"{c['label']}\"" for c in value if isinstance(c, dict))
+        elif isinstance(value, dict):
+            value = ", ".join(f"{k} {v}" for k, v in value.items() if v is not None)
         elif isinstance(value, list):
             value = ", ".join(str(v) for v in value)
         rest.append(f"{key} {value}")
@@ -580,7 +588,7 @@ def _html(title: str, data_json: str, *, locked: bool) -> str:
     robots = '<meta name="robots" content="noindex, nofollow">\n'  # a shared copy is never meant for search engines
     return (
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
-        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n'
         f'<meta http-equiv="Content-Security-Policy" content="{EXPORT_CSP}">\n'
         '<meta name="referrer" content="no-referrer">\n'
         f"{robots}"
@@ -723,7 +731,7 @@ def _single_html(title: str, data_json: str, js: str, web_dir: Path, look_sheets
                   if look_sheets else "")
     return (
         f"<!doctype html>\n{SINGLE_MARKER}\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
-        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n'
         f'<meta http-equiv="Content-Security-Policy" content="{csp}">\n'
         '<meta name="referrer" content="no-referrer">\n'
         '<meta name="robots" content="noindex, nofollow">\n'

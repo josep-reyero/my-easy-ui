@@ -14,10 +14,14 @@ import { h, fill } from "./dom.js";
 import { api, describe } from "./api.js";
 import { Stat, Table, TextBlock, Controls, componentProps, APP_NAME } from "./components.js";
 import { Chart } from "./charts.js";
+import { Timeline } from "./timeline.js";
+import { columnsFor } from "./rows.js";
 import { applyOverrides, isDark, onThemeChange } from "./theme.js";
 import { builtinStylesheet, makeStylesheet } from "./look.js";
 
-const BASIS = { stat: 9.5, line: 20, area: 20, bar: 20, table: 24, text: 18 }; // rem
+// The narrowest a component may be before its row puts fewer side by side (rem).
+const BASIS = { stat: 8.5, line: 19, area: 19, bar: 19, timeline: 19, table: 24, text: 18 };
+
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 
 function validDay(s) {
@@ -217,6 +221,7 @@ export class DashboardView {
         return used.some((n) => this.controlled.has(n));
       },
       retry: (q) => this.run([q]),
+      relayout: () => this.layoutRows(true),
       setParam: (name, value) => this.setParam(name, value),
       resetParams: () => this.resetParams(),
       paramsDiffer: () => this.paramsDiffer(),
@@ -295,12 +300,43 @@ export class DashboardView {
       }, parts.map((p) => p.el));
       const basis = Math.max(...types.map((t) => BASIS[t] || 18));
       el.style.setProperty("--basis", `${basis}rem`);
+      el.dataset.items = String(row.length);
+      el.dataset.basis = String(basis);
       return el;
     });
     fill(this.rowsEl, rows);
+    if (!this.rowsObserver && typeof ResizeObserver === "function") {
+      this.rowsObserver = new ResizeObserver(() => this.layoutRows());
+      this.rowsObserver.observe(this.rowsEl);
+    }
+    this.layoutRows();
     this.writeAddress();
     if (this.consumers.size) this.run(Array.from(this.consumers.keys()));
     else queueMicrotask(() => this.loaded("ok")); // nothing to load (text only, or a page listing problems)
+  }
+
+  /**
+   * Share each row's width out evenly: --item-basis on the row (CSS in style.css lets the components of a last,
+   * shorter line grow to fill it). Measured on the rows' own box, so it follows the window, a split screen, a
+   * zoom or a turned phone, inside the dashboard's own tree.
+   */
+  layoutRows(force = false) {
+    const width = this.rowsEl.clientWidth;
+    if (!width) return;
+    const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+    for (const el of this.rowsEl.children) {
+      // Components left out (hide_empty) do not count; a row with none left takes no room.
+      const shown = Array.from(el.children).filter((c) => !c.hidden).length;
+      el.hidden = el.children.length > 0 && shown === 0;
+      const n = shown || 1;
+      if (force) delete el.dataset.cols;
+      const gap = Number.parseFloat(getComputedStyle(el).columnGap) || 0;
+      const basis = (Number(el.dataset.basis) || 18) * rem;
+      const cols = columnsFor(n, width, basis, gap);
+      if (el.dataset.cols === String(cols)) continue;
+      el.dataset.cols = String(cols);
+      el.style.setProperty("--item-basis", cols === 1 ? "100%" : `calc((100% - ${cols - 1} * var(--eui-gap)) / ${cols} - 0.1px)`);
+    }
   }
 
   make(comp, ctx) {
@@ -313,6 +349,9 @@ export class DashboardView {
       case "area":
       case "bar":
         part = new Chart(comp, ctx);
+        break;
+      case "timeline":
+        part = new Timeline(comp, ctx);
         break;
       case "table":
         part = new Table(comp, ctx);
@@ -428,6 +467,8 @@ export class DashboardView {
   }
 
   destroy() {
+    if (this.rowsObserver) this.rowsObserver.disconnect();
+    this.rowsObserver = null;
     for (const part of this.parts) part.destroy();
     this.parts = [];
     this.unsubscribeTheme();

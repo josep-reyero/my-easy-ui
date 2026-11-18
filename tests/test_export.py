@@ -268,3 +268,18 @@ def test_first_dashboard_of_the_project_is_the_landing_page(demo_app, tmp_path):
     assert [d["slug"] for d in payload_of(out)["dashboards"]] == ["activities", "overview"]
     app_js = (Path(export.WEB_DIR) / "assets" / "app.js").read_text()
     assert "window.location.replace(`#/d/${state.dashboards[0].slug}`)" in app_js
+
+
+def test_a_copy_keeps_the_columns_of_bands_references_categories_and_timelines():
+    compiled = {"layout": [[
+        {"type": "line", "query": "a", "x": "day", "y": ["hr"], "partial": None, "band": {"low": "lo", "high": "hi", "label": None},
+         "reference": {"value": None, "column": "goal", "label": "Goal"}},
+        {"type": "bar", "query": "b", "x": "kind", "y": ["km"], "partial": None, "band": None, "reference": None, "colors_by": "kind"},
+        {"type": "timeline", "query": "c", "start": "start", "end": "until", "category": "stage", "order": None},
+        {"type": "stat", "query": "d", "value": "hr", "delta": None, "note": "status"},
+    ]]}
+    need = export._needs(compiled)
+    assert need["a"] == ({"day", "hr", "lo", "hi", "goal"}, None)
+    assert need["b"] == ({"kind", "km"}, None)
+    assert need["c"] == ({"start", "until", "stage"}, None)
+    assert need["d"] == ({"hr", "status"}, 1)

@@ -260,7 +260,7 @@ def test_data_file_change_rebuilds_the_data(pv, demo_app):
     assert r2 != r1 and bundle.current_bundle(pv.config) != b1
     res = spec.run_queries(pv.source.dashboard("overview"), ["heart"], {"since": "2026-05-01"},
                            bundle_path=pv.source.bundle_path())
-    assert res["results"]["heart"]["rows"] == [["2026-05-01", None]]
+    assert [r[:2] for r in res["results"]["heart"]["rows"]] == [["2026-05-01", None]]
 
 
 def test_broken_data_file_keeps_previous_data(pv, demo_app):

@@ -380,3 +380,100 @@ def test_a_rule_on_eui_value_sizes_the_figure():
     value = _re.search(r"\n\.stat-value \{(.*?)\}", css, _re.S).group(1)
     assert "var(--eui-size-figure)" in value and "var(--eui-font-numbers)" in value
     assert not _re.search(r"\.fig \{[^}]*var\(--eui-size-figure\)", css)
+
+
+# ---- charts: the arithmetic behind them (gaps, axis ranges, date labels, row sharing) ------------------------
+
+CHART_RUNNER = """
+import { pathToFileURL } from "node:url";
+const m = await import(pathToFileURL(process.argv[2]).href);
+const rows = await import(pathToFileURL(process.argv[3]).href);
+const days = (from, n, step = 1) => Array.from({ length: n }, (_, i) => new Date(Date.UTC(2026, 0, 1) + (from + i * step) * 864e5).toISOString().slice(0, 10));
+const out = {};
+// A missing day becomes an empty point; regular weeks too; anything irregular is left alone.
+const gappy = ["2026-01-01", "2026-01-02", "2026-01-05", "2026-01-06"];
+out.gap = m.fillDateGaps(gappy);
+out.weeks = m.fillDateGaps(["2026-01-05", "2026-01-12", "2026-01-26", "2026-02-02"]);
+out.none = [m.fillDateGaps(days(0, 10)), m.fillDateGaps(["a", "b", "c"]), m.fillDateGaps(["2026-01-03", "2026-01-02", "2026-01-01"]),
+  m.fillDateGaps(["2026-01-01", "2026-01-02", "2026-01-03", "2026-12-31"])];
+// Round ends with room above; bars and areas from zero.
+out.ranges = [
+  m.valueRange({ lo: 48, hi: 62, ticks: 4 }),
+  m.valueRange({ lo: 2500, hi: 15800, ticks: 4, zero: true }),
+  m.valueRange({ lo: 5.5, hi: 8.5, ticks: 3 }),
+  m.valueRange({ lo: -3, hi: 7, ticks: 4, zero: true }),
+  m.valueRange({ lo: 7, hi: 7, ticks: 4 }),
+  m.valueRange({ lo: 0, hi: 64000, ticks: 4, zero: true, format: "distance" }),
+  m.valueRange({ lo: 1, hi: 9, ticks: 4, step: 0.001 }),
+  m.valueRange({ lo: null, hi: null }),
+];
+const ticks = (xs, w) => { const t = m.dateTicks(xs, w, 6.6); return t && { unit: t.unit, labels: [...t.labels] }; };
+out.ticks = {
+  narrowQuarter: ticks(days(0, 120), 300),
+  wideQuarter: ticks(days(0, 120), 1400),
+  week: ticks(days(0, 7), 600),
+  year: ticks(days(0, 730), 900),
+  notDates: m.dateTicks(["run", "ride"], 400),
+};
+out.cols = [[3, 1200, 304, 24], [3, 640, 304, 24], [6, 1200, 136, 16], [6, 600, 136, 16], [6, 288, 136, 16], [5, 700, 136, 16], [1, 100, 300, 10]]
+  .map((a) => rows.columnsFor(...a));
+console.log(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="Node.js is not installed")
+def test_chart_math(tmp_path):
+    runner = tmp_path / "charts.mjs"
+    runner.write_text(CHART_RUNNER, encoding="utf-8")
+    proc = subprocess.run([NODE, str(runner), str(ASSETS / "chartmath.js"), str(ASSETS / "rows.js")],
+                          capture_output=True, text=True, timeout=60, check=False)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out["gap"] == {"xs": ["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04", "2026-01-05", "2026-01-06"],
+                          "rowOf": [0, 1, -1, -1, 2, 3]}
+    assert out["weeks"]["rowOf"] == [0, 1, -1, 2, 3] and out["weeks"]["xs"][2] == "2026-01-19"
+    assert out["none"] == [None, None, None, None]
+    line, bars, short, negative, flat, km, tiny, empty = out["ranges"]
+    assert line == {"min": 45, "max": 65, "interval": 5}  # room above and below, round ends
+    assert bars["min"] == 0 and bars["max"] >= 15800 * 1.04 and bars["max"] % bars["interval"] == 0
+    assert short["min"] <= 5.5 - 0.2 and short["max"] >= 8.5 + 0.2
+    assert negative["min"] < -3 and negative["max"] > 7
+    assert flat["min"] < 7 < flat["max"]
+    assert km["interval"] in (20000, 25000) and km["min"] == 0  # whole kilometres for distances
+    assert tiny["interval"] > 0.001  # a step far too small for the values is replaced
+    assert empty is None
+    t = out["ticks"]
+    assert t["narrowQuarter"]["unit"] in ("month", "quarter") and [x[1] for x in t["narrowQuarter"]["labels"]][:1] == ["Jan"]
+    assert t["wideQuarter"]["unit"] in ("week", "2 weeks")
+    assert all(text[0].isdigit() for _, text in t["wideQuarter"]["labels"])
+    assert t["week"]["unit"] == "day" and len(t["week"]["labels"]) == 7
+    years = [text for _, text in t["year"]["labels"]]
+    assert "Jan 2026" in years[0] and any("2027" in y for y in years)
+    assert t["notDates"] is None
+    # Never more than fit, balanced lines: 3 charts in 640 px go 2 + 1, 6 numbers go 6, 3 + 3 or 2 + 2 + 2.
+    assert out["cols"] == [3, 2, 6, 3, 2, 3, 1]
+
+
+def test_charts_are_svg_and_follow_their_box():
+    charts = (ASSETS / "charts.js").read_text(encoding="utf-8")
+    timeline = (ASSETS / "timeline.js").read_text(encoding="utf-8")
+    assert 'export const RENDERER = "svg";' in charts
+    assert '"canvas"' not in charts and '"canvas"' not in timeline
+    assert "renderer: RENDERER" in charts and "renderer: RENDERER" in timeline
+    # Every size change redraws (labels are laid out for the new width).
+    assert "new ResizeObserver(() => this.resized())" in charts
+    # No style attribute is ever written: values go in through the style object.
+    for path in OUR_JS:
+        assert 'setAttribute("style"' not in path.read_text(encoding="utf-8"), path.name
+
+
+def test_layout_uses_the_whole_width_and_container_queries():
+    css = (ASSETS / "style.css").read_text(encoding="utf-8")
+    shell = re.search(r"\.top-inner,\n\.main \{(.*?)\}", css, re.S).group(1)
+    assert "max-width" not in shell and "var(--edge-left)" in shell
+    assert re.search(r"\n\.c \{\s*container-type: inline-size;", css)
+    assert "@container (max-width: 560px)" in css  # tables become cards by their own width
+    assert "@media (max-width: 560px) {\n  .t-cards" not in css
+    assert "safe-area-inset-left" in css and "cqi" in css
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    assert "viewport-fit=cover" in html

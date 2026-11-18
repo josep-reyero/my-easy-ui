@@ -15,7 +15,7 @@ Three kinds of files in the project's `ui/` folder make up the *look*:
 
 Every one of them is optional. Without any, dashboards look as they always did.
 
-![The trail theme, light](screenshots/theme-trail-light.png)
+<p><img src="screenshots/theme-trail-light.png" alt="The trail theme, light" width="1280"></p>
 
 <p>
 <img src="screenshots/theme-instrument-dark.png" alt="The instrument theme in dark mode: teal on near-black, monospaced figures, outlined panels" width="560">
@@ -150,12 +150,14 @@ Documented and kept stable across versions: renaming one is a breaking change.
 - **Dashboard area:** `.eui-app` (with `data-project` and `data-theme="light|dark"`),
   `.eui-dashboard` (with `data-dashboard="<slug>"`), `.eui-dashboard-title`,
   `.eui-dashboard-description`, `.eui-status`.
-- **Layout:** `.eui-row` with `data-row="N"` (1 for the first row).
-- **Components:** `.eui-component` with `data-type="stat|line|area|bar|table|text|controls"` and
+- **Layout:** `.eui-row` with `data-row="N"` (1 for the first row). Every component is a size
+  container (`container-type: inline-size`), so a project's `@container (max-width: ...)` rules
+  follow the component's own width.
+- **Components:** `.eui-component` with `data-type="stat|line|area|bar|timeline|table|text|controls"` and
   `data-id="<id>"` (the `id:` setting, or `r<row>c<column>` counted from 0), plus the classes of
   its `class:` setting.
-- **Parts:** `.eui-title`, `.eui-value`, `.eui-unit`, `.eui-delta`, `.eui-hint`, `.eui-chart`,
-  `.eui-readout`, `.eui-legend`, `.eui-table`, `.eui-th`, `.eui-td`, `.eui-text`, `.eui-control`,
+- **Parts:** `.eui-title`, `.eui-value`, `.eui-unit`, `.eui-delta`, `.eui-hint`, `.eui-note`, `.eui-chart`,
+  `.eui-readout`, `.eui-legend`, `.eui-chart-card`, `.eui-table`, `.eui-th`, `.eui-td`, `.eui-text`, `.eui-control`,
   `.eui-empty`, `.eui-error`. A figure takes its size and font from `.eui-value`
   (`.eui-value { font-size: 4rem; font-family: ... }` changes it; the unit is 0.4 of it);
   `--eui-size-figure` and `--eui-font-numbers` do the same for every stat at once.
@@ -172,9 +174,10 @@ change between versions.
 
 ### Custom properties
 
-Charts are drawn on a canvas, which CSS cannot reach, so each chart reads its colours, fonts,
-line widths and grid style from the custom properties of its own element. Set them on a
-component (`[data-id="..."]`), a row, a dashboard or `.eui-app`. The groups:
+Charts are drawn as SVG by the chart library, which takes its colours, fonts, line widths and
+grid style as values rather than from CSS rules, so each chart reads them from the custom
+properties of its own element (and reads them again when the theme or a stylesheet changes). Set
+them on a component (`[data-id="..."]`), a row, a dashboard or `.eui-app`. The groups:
 
 - colours: `--eui-accent`, `--eui-accent-text`, `--eui-on-accent`, `--eui-accent-soft`,
   `--eui-background`, `--eui-surface`, `--eui-text`, `--eui-muted`, `--eui-border`, `--eui-grid`,
@@ -186,7 +189,29 @@ component (`[data-id="..."]`), a row, a dashboard or `.eui-app`. The groups:
   `--eui-pad`, `--eui-card-background`, `--eui-card-shadow`, `--eui-card-padding`
 - charts: `--eui-chart-height`, `--eui-chart-line-width`, `--eui-chart-grid-style`,
   `--eui-chart-area-opacity`, `--eui-chart-bar-radius`, `--eui-chart-font`,
-  `--eui-chart-font-size`, `--eui-chart-label`, `--eui-chart-axis`, `--eui-chart-grid`
+  `--eui-chart-font-size`, `--eui-chart-label`, `--eui-chart-axis`, `--eui-chart-grid`,
+  `--eui-chart-band-opacity`, `--eui-chart-reference`, `--eui-chart-tooltip-shadow`
+
+What the chart tokens do:
+
+| Token | Default | What it sets |
+| --- | --- | --- |
+| `--eui-chart-1` ... `-8` | from the accent (a theme's `chart:` list) | Series colours, in order; also the colours of `colors_by` categories and timeline lanes. In dark mode the first is lightened to 4.5:1 against the panel. |
+| `--eui-chart-height` | `clamp(200px, 20cqi + 112px, min(420px, 66svh))` | Height of a chart. `cqi` is a hundredth of the component's own width, so a wider chart is taller, up to 420 px and never more than about two thirds of a short screen. A fixed value (`340px`) works too. A timeline is as tall as its lanes. |
+| `--eui-chart-line-width` | `2` | Width of lines, in px; a dashed series uses the same width. |
+| `--eui-chart-grid-style` | `solid` | `solid`, `dashed`, `dotted` or `none`. |
+| `--eui-chart-area-opacity` | `0.16` | Top of an area's fade (it fades to almost nothing at the bottom). |
+| `--eui-chart-band-opacity` | `0.14` (dark `0.22`) | Fill of a `band:`, in the first series' colour. |
+| `--eui-chart-bar-radius` | `3` | Rounded top corners of bars (only the top of a stack), in px; timeline spans use up to 4. |
+| `--eui-chart-font`, `--eui-chart-font-size` | the body font, `11` | Axis labels. Figures in charts are always of equal width. |
+| `--eui-chart-label` | `var(--eui-muted)` | Axis labels and the unit above the axis. |
+| `--eui-chart-axis` | `var(--eui-border)` | The baseline under bars. |
+| `--eui-chart-grid` | `var(--eui-grid)` | Gridlines. |
+| `--eui-chart-reference` | `var(--eui-muted)` | A `reference:` line and its label. |
+| `--eui-chart-tooltip-shadow` | a hairline and a soft shadow | Edge and shadow of the hover card (`.eui-chart-card`), which also uses `--eui-surface` and `--eui-radius-small`. |
+
+A theme's `chart:` settings (`line_width`, `grid`, `area_opacity`, `bar_radius`) set the matching
+tokens, so the five ready-made themes and a project's own theme restyle every chart.
 
 ## Fonts and pictures
 

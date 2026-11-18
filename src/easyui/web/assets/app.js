@@ -89,6 +89,7 @@ function buildShell() {
   });
   fill(root, skip, header, main);
   state.shell = { nav, main };
+  watchNav();
   renderNav();
 }
 
@@ -108,11 +109,69 @@ function renderNav() {
     });
     return h("li", null, link);
   });
+  const onList = parseHash().name === "list";
   items.push(h("li", null, routeLink("#/all", "All", {
     class: "nav-link nav-all",
-    attrs: { "aria-current": parseHash().name === "list" ? "page" : null, "aria-label": "All dashboards, with what each shows" },
+    attrs: { "aria-current": onList ? "page" : null, "aria-label": "All dashboards, with what each shows" },
   })));
-  fill(nav, h("ul", { class: "nav-list" }, items));
+  const list = h("ul", { class: "nav-list", id: "eui-nav-list" }, items);
+  // When the links do not fit across (a phone, or many dashboards), they fold into a menu button that
+  // names the page you are on and opens them as a list.
+  const here = state.dashboards.find((d) => d.slug === state.slug);
+  const toggle = h("button", {
+    class: "nav-toggle",
+    type: "button",
+    attrs: { "aria-expanded": "false", "aria-controls": "eui-nav-list" },
+    on: { click: () => setNavOpen(!nav.classList.contains("is-open")) },
+  }, [h("span", { class: "nav-toggle-text", text: here ? here.title || here.slug : onList ? "All dashboards" : "Dashboards" }), icon("chevron")]);
+  nav.classList.remove("is-open");
+  fill(nav, toggle, list);
+  fitNav();
+}
+
+function setNavOpen(open) {
+  const nav = state.shell && state.shell.nav;
+  if (!nav) return;
+  nav.classList.toggle("is-open", open);
+  const toggle = nav.querySelector(".nav-toggle");
+  if (toggle) toggle.setAttribute("aria-expanded", String(open));
+}
+
+/** Fold the links into the menu button when they do not fit in the room the top bar gives them. */
+function fitNav() {
+  const nav = state.shell && state.shell.nav;
+  if (!nav || nav.hidden) return;
+  const list = nav.querySelector(".nav-list");
+  if (!list) return;
+  const wasOpen = nav.classList.contains("is-open");
+  nav.classList.remove("is-collapsed", "is-open");
+  const over = list.scrollWidth > list.clientWidth + 1;
+  nav.classList.toggle("is-collapsed", over);
+  if (over && wasOpen) setNavOpen(true);
+  else setNavOpen(false);
+}
+
+let navWatch = false;
+function watchNav() {
+  if (navWatch) return;
+  navWatch = true;
+  let frame = 0;
+  window.addEventListener("resize", () => {
+    cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(fitNav);
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && state.shell && state.shell.nav.classList.contains("is-open")) {
+      setNavOpen(false);
+      const toggle = state.shell.nav.querySelector(".nav-toggle");
+      if (toggle) toggle.focus();
+    }
+  });
+  document.addEventListener("click", (e) => {
+    const nav = state.shell && state.shell.nav;
+    if (nav && nav.classList.contains("is-open") && !nav.contains(e.target)) setNavOpen(false);
+  });
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(fitNav);
 }
 
 function renderHome() {

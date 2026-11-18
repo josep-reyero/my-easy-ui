@@ -71,6 +71,7 @@ import copy
 import dataclasses
 import datetime as _dt
 import difflib
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -97,6 +98,8 @@ PARAM_TYPES: dict[str, tuple[str, ...]] = {
 QUERY_KEYS = ("sql",)
 OPTION_KEYS = ("value", "label")
 TABLE_COLUMN_KEYS = ("column", "label", "format")
+BAND_KEYS = ("low", "high", "label")
+REFERENCE_KEYS = ("value", "column", "label")
 LIMITS = {
     "file_bytes": 256_000,
     "rows": 50,
@@ -185,6 +188,32 @@ _Y = Setting(
     "Column, or list of up to 8 columns, drawn as series. Name them nicely in the SQL with AS.",
     required=True,
 )
+_BAND = Setting(
+    "band",
+    "A shaded band behind the first series, such as a personal usual range: {low: <column>, high: <column>} and "
+    "optionally label: (default 'Usual range').",
+)
+_REFERENCE = Setting(
+    "reference",
+    "A dashed line across the chart, such as a goal or an average: a number, {value: <number>}, or {column: "
+    "<column>} (its value in the first row that has one); optionally label:.",
+)
+_DASHED = Setting(
+    "series_names",
+    "Some of the y columns, drawn as dashed lines (an average or a forecast next to the measured values).",
+)
+_HIDE_EMPTY = Setting(
+    "bool",
+    "true leaves the component out of the page while its query has no rows (or nothing to show), instead of "
+    "saying so.",
+    default=False,
+)
+_COLORS_BY = Setting(
+    "column",
+    "One colour per value of this column (often x itself): each bar takes the colour of its category, and the "
+    "legend lists them. Only with one y column.",
+)
+_NOTE = Setting("column", "Column holding a short text shown under the number (first row), such as a status.")
 
 COMPONENTS: dict[str, dict[str, Any]] = {
     "stat": {
@@ -202,17 +231,21 @@ COMPONENTS: dict[str, dict[str, Any]] = {
                 "ones in a muted red. Not set: the delta is drawn in neutral grey.",
             ),
             "hint": Setting("longtext", "A short explanation under the number."),
+            "note": _NOTE,
+            "hide_empty": _HIDE_EMPTY,
         },
     },
     "line": {
         "description": "A line chart of one or more columns over x.",
         "settings": {"title": _TITLE, "query": _QUERY, "x": _X, "y": _Y, "format": _FORMAT, "unit": _UNIT,
-                     "step": _STEP, "readout": _READOUT, "partial": _PARTIAL},
+                     "step": _STEP, "readout": _READOUT, "partial": _PARTIAL, "band": _BAND,
+                     "reference": _REFERENCE, "dashed": _DASHED, "hide_empty": _HIDE_EMPTY},
     },
     "area": {
         "description": "Like line, with the area under each line filled.",
         "settings": {"title": _TITLE, "query": _QUERY, "x": _X, "y": _Y, "format": _FORMAT, "unit": _UNIT,
-                     "step": _STEP, "readout": _READOUT, "partial": _PARTIAL},
+                     "step": _STEP, "readout": _READOUT, "partial": _PARTIAL, "band": _BAND,
+                     "reference": _REFERENCE, "dashed": _DASHED, "hide_empty": _HIDE_EMPTY},
     },
     "bar": {
         "description": "A bar chart of one or more columns per x value.",
@@ -227,6 +260,25 @@ COMPONENTS: dict[str, dict[str, Any]] = {
             "step": _STEP,
             "readout": _READOUT,
             "partial": _PARTIAL,
+            "reference": _REFERENCE,
+            "colors_by": _COLORS_BY,
+            "hide_empty": _HIDE_EMPTY,
+        },
+    },
+    "timeline": {
+        "description": "Spans of time in categories along a time axis, one lane per category (sleep stages over a "
+        "night, workouts over a day).",
+        "settings": {
+            "title": _TITLE,
+            "query": _QUERY,
+            "start": Setting("column", "Column with when each span starts: text YYYY-MM-DD HH:MM[:SS] (as written, "
+                             "no time-zone conversion) or seconds since 1970-01-01 UTC.", required=True),
+            "end": Setting("column", "Column with when each span ends, written like start.", required=True),
+            "category": Setting("column", "Column naming each span's category (deep, light, rem, awake).",
+                                required=True),
+            "order": Setting("order", "The categories from the top lane down, which also sets their colours. "
+                             "Not set: in the order they first appear."),
+            "hide_empty": _HIDE_EMPTY,
         },
     },
     "table": {
@@ -245,6 +297,7 @@ COMPONENTS: dict[str, dict[str, Any]] = {
                 "scroll (the table as it is, scrolled sideways).",
                 default="cards",
             ),
+            "hide_empty": _HIDE_EMPTY,
         },
     },
     "text": {
@@ -286,6 +339,10 @@ _KIND_TEXT = {
     "readout": "latest, pointer or none",
     "partial": "last, or a column name returned by the query",
     "step": "a number above 0",
+    "band": "{low: <column>, high: <column>, label: <text>}",
+    "reference": "a number, or {value: <number> | column: <column>, label: <text>}",
+    "series_names": "a y column, or a list of y columns",
+    "order": "a list of up to 12 category names",
     "phone": "cards or scroll",
     "component_id": "lowercase letters, digits and -, starting with a letter (up to 41)",
     "classes": f"up to {MAX_CLASSES} space-separated names of lowercase letters, digits and -",
@@ -900,6 +957,10 @@ class Dashboard:
 _BAD = object()
 
 
+def _is_number(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
 def _is_text_like(v: Any) -> bool:
     return isinstance(v, (str, int, float, _dt.date)) and not isinstance(v, bool)
 
@@ -1192,6 +1253,74 @@ def _check_setting(ctx: _Ctx, path, kind: str, s: Setting, v: Any, ctype: str, d
             ctx.err(path, f"{what} must be a number above 0.", hint="For example step: 5000 for a line every 5 km of metres.")
             return _BAD
         return v
+    if kind == "band":
+        if not isinstance(v, dict):
+            ctx.err(path, f"{what} must be {{low: <column>, high: <column>}}.",
+                    hint="For example: band: {low: usual_low, high: usual_high}")
+            return _BAD
+        _keys(ctx, path, v, BAND_KEYS, "a band")
+        out: dict[str, Any] = {}
+        for k in ("low", "high"):
+            c = v.get(k)
+            if not isinstance(c, str) or not c:
+                ctx.err(path + (k,) if k in v else path, f'The band has no "{k}" column.',
+                        hint=f"Add {k}: <column>, the column with the {'lower' if k == 'low' else 'upper'} edge.")
+                return _BAD
+            out[k] = c
+        label = None
+        if v.get("label") is not None:
+            label = _text(ctx, path + ("label",), v["label"], limit=40, what="The band label")
+            if label is _BAD:
+                return _BAD
+        out["label"] = label
+        if any(k not in BAND_KEYS for k in v):
+            return _BAD
+        return out
+    if kind == "reference":
+        if _is_number(v):
+            return {"value": v, "column": None, "label": None}
+        if not isinstance(v, dict):
+            ctx.err(path, f"{what} must be a number or {{value: <number>}} or {{column: <column>}}.",
+                    hint="For example: reference: {value: 10000, label: Goal}")
+            return _BAD
+        _keys(ctx, path, v, REFERENCE_KEYS, "a reference")
+        has_value, has_column = v.get("value") is not None, v.get("column") is not None
+        if has_value == has_column:
+            ctx.err(path, "A reference has either value: (a number) or column: (a column), one of the two.",
+                    hint="For example: reference: {value: 10000, label: Goal} or reference: {column: goal, label: Goal}")
+            return _BAD
+        if has_value and not _is_number(v["value"]):
+            ctx.err(path + ("value",), "The reference value must be a number.", hint="For example: value: 10000")
+            return _BAD
+        if has_column and (not isinstance(v["column"], str) or not v["column"]):
+            ctx.err(path + ("column",), "The reference column must be a column name.")
+            return _BAD
+        label = None
+        if v.get("label") is not None:
+            label = _text(ctx, path + ("label",), v["label"], limit=40, what="The reference label")
+            if label is _BAD:
+                return _BAD
+        if any(k not in REFERENCE_KEYS for k in v):
+            return _BAD
+        return {"value": v.get("value"), "column": v.get("column"), "label": label}
+    if kind == "series_names":
+        items = [v] if isinstance(v, str) else v
+        if not isinstance(items, list) or not items or not all(isinstance(c, str) and c for c in items):
+            ctx.err(path, f"{what} must be a y column or a list of y columns.", hint='For example: dashed: ["7-day average"]')
+            return _BAD
+        return list(dict.fromkeys(items))
+    if kind == "order":
+        if not isinstance(v, list) or not v or len(v) > 12 or not all(_is_text_like(c) for c in v):
+            ctx.err(path, f"{what} must be a list of 1 to 12 category names.", hint="For example: order: [awake, rem, light, deep]")
+            return _BAD
+        names = [str(c) for c in v]
+        if len(set(names)) != len(names):
+            ctx.err(path, "A category is listed twice.", hint="List each category once.")
+            return _BAD
+        if any(len(n) > 60 for n in names):
+            ctx.err(path, "A category name is longer than 60 characters.", hint="Use the names the query returns.")
+            return _BAD
+        return names
     if kind == "app_name":
         if not isinstance(v, str) or not APP_NAME_RE.match(v):
             ctx.err(path, f"app is {str(v)[:45]!r}, which is not an app's name.",
@@ -1347,6 +1476,17 @@ def _check_component(ctx: _Ctx, path, raw: Any, dash: dict, refs: list, r: int, 
         out["blocks"] = out.pop("body")
     if ctype == "controls" and out.get("params") is None:
         out["params"] = list(dash["params"])
+    if out.get("dashed"):
+        for i, name in enumerate(out["dashed"]):
+            if name not in (out.get("y") or []):
+                ctx.err(path + ("dashed",) + ((i,) if isinstance(raw.get("dashed"), list) else ()),
+                        f"dashed names {name!r}, which is not one of this chart's y columns.",
+                        allowed=list(out.get("y") or []), got=name, hint="Name some of the columns under y:.")
+                ok = False
+    if out.get("colors_by") and len(out.get("y") or []) > 1:
+        ctx.err(path + ("colors_by",), "colors_by gives each bar its category's colour, so the chart can have only "
+                "one y column.", hint="Keep one column under y:, or remove colors_by and let each series have its colour.")
+        ok = False
     if not ok:
         return None
     q = out.get("query")
@@ -1361,6 +1501,11 @@ def _check_component(ctx: _Ctx, path, raw: Any, dash: dict, refs: list, r: int, 
             elif s.kind == "table_columns" and val:
                 for i, col in enumerate(val):
                     refs.append((path + (key, i), q, col["column"]))
+            elif s.kind == "band" and val:
+                refs.append((path + (key, "low"), q, val["low"]))
+                refs.append((path + (key, "high"), q, val["high"]))
+            elif s.kind == "reference" and val and val.get("column"):
+                refs.append((path + (key, "column"), q, val["column"]))
     return out
 
 

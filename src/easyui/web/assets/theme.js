@@ -180,7 +180,8 @@ function derive(accent, paper, surface, ink, dark) {
   const C = Math.max(0.06, Math.min(a.C, 0.13));
   const L = dark ? 0.74 : 0.6;
   const offsets = [0, 160, 75, 250, 35, 200, 115, 290];
-  const series = offsets.map((off, i) => withContrast(i === 0 ? accent : fromLch({ L, C, H: a.H + off }), surface, 3));
+  // On a dark panel thin lines need more contrast than text-sized marks: the accent is lightened for them.
+  const series = offsets.map((off, i) => withContrast(i === 0 ? accent : fromLch({ L, C, H: a.H + off }), surface, dark ? 4.5 : 3));
   return { accentInk, onAccent, accentSoft, series };
 }
 

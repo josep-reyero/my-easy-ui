@@ -106,9 +106,12 @@ STABLE_CLASSES: dict[str, str] = {
     "eui-unit": "The unit set smaller beside a figure (km, min).",
     "eui-delta": "The change under a stat. Also has is-up, is-down or is-flat, and is-good or is-bad with better:.",
     "eui-hint": "The explanation under a stat (hint:).",
+    "eui-note": "The short text under a stat's figure (note:), such as a status.",
     "eui-chart": "The box a chart is drawn in. Set chart custom properties here or on the component.",
     "eui-readout": "The value shown in a chart's heading.",
-    "eui-legend": "The legend of a chart with several series.",
+    "eui-legend": "The legend of a chart with several series, a band, a reference line or colours by category.",
+    "eui-chart-card": ("The small card beside the pointer on a chart with several series (date and values). It "
+                       "uses the panel colour, --eui-radius-small and --eui-chart-tooltip-shadow."),
     "eui-table": "A table (also the one behind View as table).",
     "eui-th": "A table heading cell.",
     "eui-td": "A table value cell.",
@@ -122,7 +125,7 @@ DATA_ATTRIBUTES: dict[str, str] = {
     "data-theme": "On .eui-app (and the page): light or dark, as the device shows it now.",
     "data-dashboard": "On .eui-dashboard (and the page): the dashboard's name (its file name without .yaml).",
     "data-row": "On .eui-row: the row's number, 1 for the first.",
-    "data-type": "On .eui-component: stat, line, area, bar, table, text or controls.",
+    "data-type": "On .eui-component: stat, line, area, bar, timeline, table, text or controls.",
     "data-id": "On .eui-component: the component's id: setting, or r<row>c<column> counted from 0 when it has none.",
 }
 COMPONENT_SETTINGS: dict[str, str] = {
@@ -166,7 +169,8 @@ CUSTOM_PROPERTIES: dict[str, tuple[str, str]] = {
     "--eui-card-background": ("Background of panels (charts, tables).", "var(--eui-surface)"),
     "--eui-card-shadow": ("Edge or shadow of panels (a box-shadow value).", "a faint hairline"),
     "--eui-card-padding": ("Space inside panels.", "var(--eui-pad)"),
-    "--eui-chart-height": ("Height of a chart.", "clamp(196px, 22vw, 264px)"),
+    "--eui-chart-height": ("Height of a chart (a timeline is as tall as its lanes).",
+                           "clamp(200px, 20cqi + 112px, min(420px, 66svh)): by the component's width"),
     "--eui-chart-line-width": ("Width of chart lines, a number of px.", "2"),
     "--eui-chart-grid-style": ("Gridlines: solid, dashed, dotted or none.", "solid"),
     "--eui-chart-area-opacity": ("How strongly area charts are filled, 0 to 1.", "0.16"),
@@ -176,6 +180,11 @@ CUSTOM_PROPERTIES: dict[str, tuple[str, str]] = {
     "--eui-chart-label": ("Colour of axis labels.", "var(--eui-muted)"),
     "--eui-chart-axis": ("Colour of the baseline.", "var(--eui-border)"),
     "--eui-chart-grid": ("Colour of gridlines.", "var(--eui-grid)"),
+    "--eui-chart-band-opacity": ("How strongly a band (band:) is filled, 0 to 1, in the first series' colour.",
+                                 "0.14 / dark 0.22"),
+    "--eui-chart-reference": ("Colour of a reference line (reference:) and its label.", "var(--eui-muted)"),
+    "--eui-chart-tooltip-shadow": ("Edge and shadow of the hover card on charts (a box-shadow value).",
+                                   "a hairline and a soft drop shadow"),
     "--eui-theme": ("Set to 1 by a theme file (read by easy-ui).", "unset"),
 }
 

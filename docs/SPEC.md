@@ -233,7 +233,26 @@ layout:
       ...
 ```
 
-Components in a row share its width equally. On a narrow screen rows stack.
+**How rows fit the screen.** A row is a list of what belongs together; how many of its components
+stand side by side depends on the room there is, from a 320 px phone to an ultrawide screen:
+
+- each kind of component has a smallest comfortable width: a `stat` about 8.5 rem (136 px), a
+  chart or a `timeline` 19 rem, a `table` 24 rem, a `text` 18 rem; a row uses the largest of its
+  components';
+- as many as fit go side by side, in equal shares; when not all fit they are spread over balanced
+  lines (six stats: 6 across, 3 + 3 or 2 + 2 + 2; three charts: 3, or 2 + 1), and a shorter last
+  line is shared out over its full width;
+- a row declared with three components shows three across whenever there is room for three;
+- it is measured on the dashboard's own box, so it follows a resized or split window, a zoom and
+  a turned phone, never only the screen size;
+- inside a component its own width decides: a figure shrinks to fit a narrow tile, a table becomes
+  cards below 560 px of its own width, a chart is taller when it is wider (200 px up to 420 px, and
+  never more than about two thirds of a short, landscape screen), and controls wrap;
+- the page has no largest width: it uses the whole window, with gutters that grow with it; text
+  keeps a readable line length (about 66 characters) on its own.
+
+No setting is needed for any of this. A project's stylesheet can still change it (for example
+`.eui-row[data-row="3"] { display: grid; grid-template-columns: 1fr; }`).
 
 All components take `type`. Unknown settings are errors; the message lists the allowed ones.
 
@@ -272,6 +291,8 @@ One big number from the **first row** of a query.
 | `delta_format` | no | Format for the delta (default: same as `format`). |
 | `better` | no | `higher` or `lower`: which way of the delta is good news. A good change is drawn in the accent colour, a bad one in a muted red. Not set: neutral grey (a change is not always good or bad). |
 | `hint` | no | Short explanation under the number (up to 500 characters). |
+| `note` | no | Column holding a short text shown under the figure (first row), such as a status ("Normal for you"). |
+| `hide_empty` | no | `true` leaves the stat out of the page while its query has no rows or its value is NULL, instead of showing `—`. |
 
 A value that is not a number (with format `date` or `datetime`, or text) is shown smaller than
 numbers, so a date never outweighs the figures next to it.
@@ -291,6 +312,15 @@ A line chart (or with the area under each line filled).
 | `step` | no | The gap between the lines across the chart, in the query's own numbers (for `distance` in metres, `5000` is a line every 5 km). Default: round steps from the values (0, 20 km, 40 km; 0, 30 min, 1 h). A step that would draw more than 40 lines is ignored. |
 | `readout` | no | The value in the chart's heading: `latest` (default: the newest point on a date axis, or the one under the pointer), `pointer` (only while pointing at the chart) or `none`. |
 | `partial` | no | A period still in progress (this week so far): `last` (the last row) or a column that is true (`1`) for such rows. Drawn with a dashed line into an open point; the readout and the table say "so far". |
+| `band` | no | A shaded band behind the first series, such as a personal usual range: `{low: <column>, high: <column>}`, optionally `label:` (up to 40 characters; default "Usual range"). The readout, the legend and the table show it. Where either edge is NULL the band has a gap. |
+| `reference` | no | A thin dashed line across the chart, such as a goal or an average: a number (`reference: 150`), `{value: <number>}` or `{column: <column>}` (that column's value in the first row that has one, so the query can work it out), optionally `label:` (up to 40 characters). It is always inside the axis, written at the right end and in the legend. |
+| `dashed` | no | Some of the `y` columns, drawn as dashed lines (a 7-day average or a forecast beside the measured values): one column or a list. Each must be one of `y`. |
+| `hide_empty` | no | `true` leaves the chart out of the page while its query has no rows or nothing to draw, instead of saying so; the rest of its row closes up. |
+
+Points are spaced one per row. When `x` holds plain dates (`YYYY-MM-DD`) in rising order that are
+a regular daily or weekly series, a missing date leaves a gap in the line (the chart adds the
+missing dates as empty points; the table shows only the query's rows). A value alone between
+gaps is drawn as a dot. Lines are straight between points.
 
 ```yaml
 - type: bar
@@ -305,8 +335,69 @@ A line chart (or with the area under each line filled).
 
 ### `bar`
 
-Same settings as `line`, plus `stacked` (`true` / `false`, default `false`). A `partial` bar is
-drawn lighter.
+Same settings as `line` except `band` and `dashed`, plus:
+
+| Setting | Required | Meaning |
+|---|---|---|
+| `stacked` | no | `true` stacks the series on top of each other (the hover card shows the total). Default `false`. |
+| `colors_by` | no | A column whose values give each bar its colour (often `x` itself), one colour per value in the order they first appear, listed in the legend. Only with one `y` column. |
+
+A `partial` bar is drawn lighter, with a dashed edge.
+
+```yaml
+- type: line
+  title: Resting heart rate
+  query: heart            # SELECT day, resting_hr AS "Resting heart rate", lo, hi FROM ...
+  x: day
+  y: Resting heart rate
+  unit: bpm
+  band: {low: lo, high: hi}
+- type: line
+  title: Steps
+  query: steps            # SELECT day, steps AS "Steps", avg7 AS "7-day average", 10000 AS goal ...
+  x: day
+  y: [Steps, 7-day average]
+  dashed: [7-day average]
+  format: integer
+  reference: {column: goal, label: Step goal}
+- type: bar
+  title: Distance by kind
+  query: by_kind
+  x: kind
+  y: Distance
+  format: distance
+  colors_by: kind
+```
+
+### `timeline`
+
+Spans of time in categories along a time axis, one lane per category: sleep stages over a night,
+workouts over a fortnight.
+
+| Setting | Required | Meaning |
+|---|---|---|
+| `title` | yes | Heading. |
+| `query` | yes | A query name. |
+| `start` | yes | Column with when each span starts: text `YYYY-MM-DD HH:MM[:SS]` (or with `T`), read as written with no time-zone conversion, or seconds since 1970-01-01 UTC. |
+| `end` | yes | Column with when each span ends, written like `start`. Rows whose end is not after their start are left out. |
+| `category` | yes | Column naming each span's category; lanes and the legend show the names as the query returns them. |
+| `order` | no | The categories from the top lane down (1 to 12 names), which also sets their colours (`--eui-chart-1`, `-2`, ...). Listed categories keep their lane even on a night without them; others follow in the order they first appear. |
+| `hide_empty` | no | As for charts. |
+
+The heading shows, for a period of up to a day, its length and its first and last time
+("7 h 32 min · 23:10–06:42"); for a longer one, the time of all its spans together. Pointing at a
+span shows its category, times and length. The legend gives each category's total time. "View as
+table" lists every span.
+
+```yaml
+- type: timeline
+  title: Last night
+  query: stages           # SELECT start, until, stage FROM sleep_stages WHERE night = ...
+  start: start
+  end: until
+  category: stage
+  order: [awake, rem, light, deep]
+```
 
 ### `table`
 
@@ -316,7 +407,8 @@ drawn lighter.
 | `query` | yes | A query name. |
 | `columns` | no | Which columns to show, in order: a column name, or `{column, label, format}`. Default: all. |
 | `limit` | no | Show at most this many rows (1 to 5000). |
-| `phone` | no | On narrow screens (560 px and less): `cards` (default: each row as a small card, the first column as its heading, then one "label  value" line per column) or `scroll` (the table as it is, scrolled sideways). |
+| `phone` | no | When the table's own width is 560 px or less (a phone, or a narrow column on a larger screen): `cards` (default: each row as a small card, the first column as its heading, then one "label  value" line per column) or `scroll` (the table as it is, scrolled sideways). |
+| `hide_empty` | no | `true` leaves the table out of the page while its query has no rows. |
 
 ### `text`
 
@@ -354,6 +446,7 @@ Params without a control on the page keep their default; validation warns about 
 | `date` | `YYYY-MM-DD…` text or Unix seconds | `2026-03-14` → `14 Mar 2026` |
 | `datetime` | `YYYY-MM-DD HH:MM…` text or Unix seconds | `2026-03-14T07:05:09Z` → `14 Mar 2026 07:05` |
 | `pace` | seconds per km | `312` → `5:12 /km` |
+| `clock` | seconds after midnight, or text with a time | `83400` → `23:10`, `90000` → `01:00`, `"2026-03-14 06:42"` → `06:42` (a time of day on a 24-hour clock, to the minute; numbers wrap around the day, so a bedtime after midnight can be written past 24 h to average it with earlier ones) |
 
 A missing value (NULL) always shows as `—`. Without a format, numbers use `number` and text is
 shown unchanged. Text given to a numeric format is shown unchanged unless it is plain numeric text.
@@ -501,13 +594,14 @@ into DOM nodes; it never contains HTML.
     [
       {"id": "r1c0", "type": "stat", "title": "Distance", "query": "totals", "value": "distance",
        "format": "distance", "delta": null, "delta_format": null, "better": null,
-       "hint": "Everything you walked, ran and rode."},
+       "hint": "Everything you walked, ran and rode.", "note": null, "hide_empty": false},
       {"id": "r1c1", "type": "line", "title": "Distance per day", "query": "daily", "x": "day",
        "y": ["Distance"], "format": "distance", "unit": null, "step": null, "readout": "latest",
-       "partial": null},
+       "partial": null, "band": {"low": "usual_low", "high": "usual_high", "label": null},
+       "reference": {"value": 5000, "column": null, "label": "Goal"}, "dashed": null, "hide_empty": false},
       {"id": "r1c2", "type": "bar", "title": "Steps", "query": "daily", "x": "day",
        "y": ["Steps"], "format": "integer", "unit": null, "stacked": false, "step": null,
-       "readout": "latest", "partial": null}
+       "readout": "latest", "partial": null, "reference": null, "colors_by": null, "hide_empty": false}
     ],
     [
       {"id": "r2c0", "type": "table", "title": "Recent", "query": "daily", "limit": 20,

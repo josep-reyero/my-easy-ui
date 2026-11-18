@@ -23,9 +23,14 @@ Public API
 ----------
 ``find_browser(env=None) -> str | None``
 ``Pipe``                 a minimal DevTools-protocol client over the two pipe descriptors.
-``capture(html_path, *, out, width, height, dark, browser, fragment="", timeout=60) -> dict``
+``capture(html_path, *, out, width, height, dark, browser, fragment="", scale=2, timeout=60) -> dict``
 ``screenshot(config, *, out, dashboard=None, phone=False, dark=False, width=None, published=False,
-fixture=False, values=None, browser=None, height=None) -> dict``
+fixture=False, values=None, browser=None, height=None, scale=2) -> dict``
+
+Pictures are taken at 2 device pixels per CSS pixel by default (``--scale 1|2|3``), as a high-density
+screen shows the page, so text and charts stay sharp when the picture is shown at its CSS size
+(a 1280 px wide page gives a 2560 px wide picture). A picture is at most ``MAX_WIDTH_PIXELS`` device
+pixels wide (a wider request is refused) and ``MAX_DEVICE_PIXELS`` high (a taller page is cut there).
 ``register(subparsers)``  the ``screenshot`` command.
 """
 
@@ -52,6 +57,10 @@ from easyui.errors import EasyUIError, NotFound, TemporaryFailure, UsageError
 DESKTOP = (1280, 900)
 PHONE = (390, 844)
 MAX_HEIGHT = 12_000
+SCALES = (1, 2, 3)
+DEFAULT_SCALE = 2
+MAX_DEVICE_PIXELS = 16_384  # the tallest picture, in device pixels (Chromium's largest picture side)
+MAX_WIDTH_PIXELS = 7_680  # the widest picture, in device pixels (a 3840 px page at 2x)
 _NAMES = ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "chrome", "chrome-headless-shell",
           "microsoft-edge", "brave-browser")
 _MAC_APPS = (
@@ -205,6 +214,7 @@ def capture(
     browser: str,
     fragment: str = "",
     mobile: bool = False,
+    scale: int = DEFAULT_SCALE,
     timeout: float = 60.0,
     top: int | None = None,
 ) -> dict[str, Any]:
@@ -221,7 +231,7 @@ def capture(
         target = pipe.call("Target.createTarget", {"url": "about:blank"})["targetId"]
         session = pipe.call("Target.attachToTarget", {"targetId": target, "flatten": True})["sessionId"]
         pipe.call("Emulation.setDeviceMetricsOverride",
-                  {"width": width, "height": height, "deviceScaleFactor": 2 if mobile else 1, "mobile": mobile}, session)
+                  {"width": width, "height": height, "deviceScaleFactor": scale, "mobile": mobile}, session)
         pipe.call("Emulation.setEmulatedMedia", {"features": [
             {"name": "prefers-color-scheme", "value": "dark" if dark else "light"},
             {"name": "prefers-reduced-motion", "value": "reduce"},
@@ -241,8 +251,9 @@ def capture(
         full = max(height, min(MAX_HEIGHT, int(size.get("height", height)) + 1))
         if top:
             full = min(full, top)
+        full = min(full, MAX_DEVICE_PIXELS // scale)
         pipe.call("Emulation.setDeviceMetricsOverride",
-                  {"width": width, "height": full, "deviceScaleFactor": 2 if mobile else 1, "mobile": mobile}, session)
+                  {"width": width, "height": full, "deviceScaleFactor": scale, "mobile": mobile}, session)
         time.sleep(0.3)
         shot = pipe.call("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": False}, session)
         state = pipe.call("Runtime.evaluate", {"expression": "document.title", "returnByValue": True}, session)
@@ -254,7 +265,8 @@ def capture(
     tmp = out.with_name(f".{out.name}.tmp")
     tmp.write_bytes(data)
     os.replace(tmp, out)
-    return {"out": str(out), "width": width, "height": full, "bytes": len(data),
+    return {"out": str(out), "width": width, "height": full, "scale": scale, "pixels": [width * scale, full * scale],
+            "bytes": len(data),
             "page_title": state.get("result", {}).get("value")}
 
 
@@ -271,8 +283,8 @@ def screenshot(
     values: dict | None = None,
     browser: str | None = None,
     height: int | None = None,
+    scale: int = DEFAULT_SCALE,
 ) -> dict[str, Any]:
-    from easyui import export  # noqa: PLC0415
 
     out = Path(out).expanduser()
     if out.suffix.lower() != ".png":
@@ -284,16 +296,22 @@ def screenshot(
         w = width
     if height is not None and not 200 <= height <= MAX_HEIGHT:
         raise UsageError(f"--height must be from 200 to {MAX_HEIGHT} pixels.", hint="For example: --height 900")
+    if isinstance(scale, bool) or scale not in SCALES:
+        raise UsageError("--scale must be 1, 2 or 3 (device pixels per CSS pixel).", hint="For example: --scale 2")
+    if w * scale > MAX_WIDTH_PIXELS:
+        raise UsageError(f"--width {w} at --scale {scale} would make a picture wider than {MAX_WIDTH_PIXELS} pixels.",
+                         hint="Use a smaller width or a smaller scale.")
     browser = browser or find_browser()
     if not browser:
         raise _no_browser()
     with paths.cleanup_on_signals():  # SIGTERM / SIGHUP still remove the temporary copy of the dashboards
         return _screenshot(config, out=out, dashboard=dashboard, phone=phone, dark=dark, w=w, h=h, height=height,
-                           published=published, fixture=fixture, values=values, browser=browser)
+                           published=published, fixture=fixture, values=values, browser=browser, scale=scale)
 
 
 def _screenshot(config: Any, *, out: Path, dashboard: str | None, phone: bool, dark: bool, w: int, h: int,
-                height: int | None, published: bool, fixture: bool, values: dict | None, browser: str) -> dict[str, Any]:
+                height: int | None, published: bool, fixture: bool, values: dict | None, browser: str,
+                scale: int = DEFAULT_SCALE) -> dict[str, Any]:
     from easyui import export  # noqa: PLC0415
 
     tmp = Path(tempfile.mkdtemp(prefix="easyui-shot-"))
@@ -305,7 +323,7 @@ def _screenshot(config: Any, *, out: Path, dashboard: str | None, phone: bool, d
                            hint="The dashboards are: " + ", ".join(res["dashboards"]) + ".")
         slug = dashboard or res["dashboards"][0]
         shot = capture(tmp / "site" / "index.html", out=out, width=w, height=h, dark=dark, browser=browser,
-                       fragment=f"#/d/{slug}", mobile=phone, top=height)
+                       fragment=f"#/d/{slug}", mobile=phone, top=height, scale=scale)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return {"app": config.name, "dashboard": slug, "dark": dark, "phone": phone, "browser": browser,
@@ -320,8 +338,10 @@ def _cmd_screenshot(args: argparse.Namespace) -> Any:
     res = screenshot(
         config, out=args.out, dashboard=args.dashboard, phone=args.phone, dark=args.dark, width=args.width,
         published=args.published, fixture=args.fixture, values=parse_values(args.set), height=args.height,
+        scale=args.scale,
     )
-    text = (f"Saved a picture of the dashboard {res['dashboard']} ({res['width']} x {res['height']} pixels, "
+    text = (f"Saved a picture of the dashboard {res['dashboard']} ({res['width']} x {res['height']} CSS pixels at "
+            f"{res['scale']}x, {res['pixels'][0]} x {res['pixels'][1]} in the file, "
             f"{'dark' if res['dark'] else 'light'}, from the {res['source']}) to {paths.display_path(res['out'])}.")
     return Result(res, text)
 
@@ -339,6 +359,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--width", type=int, help="the page width in pixels")
     p.add_argument("--height", type=int, help="only the top of the page, this many pixels high (default: the whole page)")
     p.add_argument("--dark", action="store_true", help="dark mode")
+    p.add_argument("--scale", type=int, choices=SCALES, default=DEFAULT_SCALE,
+                   help="device pixels per CSS pixel, as on a high-density screen (default: 2)")
     p.add_argument("--published", action="store_true", help="the published dashboards instead of the working files")
     p.add_argument("--fixture", action="store_true", help="with the made-up sample data in ui/fixtures/")
     p.add_argument("--set", action="append", metavar="[DASHBOARD.]NAME=VALUE", help="a control value (repeatable)")
