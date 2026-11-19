@@ -143,7 +143,9 @@ and add a new passkey, which is a first passkey again. Make new recovery codes t
 
 **Passwords and agents.** Only a person can set the sign-in password: `easy-ui set-password`
 reads it from the terminal, never from an argument, a variable or a pipe, and answers an agent
-with exit code 6 ("needs the human"); so does `easy-ui recovery-codes`. An agent looks at pages
+with exit code 6 ("needs the human"); so does `easy-ui recovery-codes`. Its prompt states the rule
+(at least 12 characters), and a too-short entry or a second entry that differs asks again, three
+times in all, before it stops with exit code 2. An agent looks at pages
 with `easy-ui preview`, whose link works once (it then prints a new one for the next browser),
 or takes a picture with `easy-ui screenshot`. Automated tests set a made-up password with the
 library function `easyui.auth.set_password(state.auth, "...")`.
@@ -231,6 +233,25 @@ PORT` answers only to `http://localhost:PORT` (and `http://127.0.0.1:PORT`, with
 exactly that port, and `serve --socket` refuses to start. Passkeys are made for the address's
 name (its RP ID) and keep it: a passkey made on `http://localhost:8765` works on
 `http://localhost` at any port, one made on `https://myserver.example.ts.net` only there.
+
+**Serving privately.** On a server the dashboards are opened from your other devices through
+Tailscale, which forwards to the project's socket:
+
+```sh
+tailscale serve --bg --https=443 unix:/run/mes/fitness-web.sock
+```
+
+with the server started (by the units from `easy-ui units --origin https://myserver.example.ts.net`) as
+`easy-ui serve --ui-dir ... --auth-dir ... --origin https://myserver.example.ts.net`. A proxy that
+forwards to a local socket sends `Host: localhost` and the name the browser used in
+`X-Forwarded-Host`; on a local socket, and only there, easy-ui checks that single header (a
+repeated or malformed one is refused) against `--origin`, and over a TCP port it reads `Host`
+alone. Whoever can connect to the socket is trusted to state the host, so keep the socket
+owner-only: the systemd socket belongs to root with mode 0600, so only the Tailscale daemon can
+connect, and `easy-ui serve --socket PATH` creates it owner-only and refuses a folder other
+accounts can write to. Give the socket only to a proxy that sets `X-Forwarded-Host` itself, as
+`tailscale serve` does. A request under any other name gets `unknown_host`, and the server's log
+says which name it was and which addresses it answers to.
 
 Every command accepts `--json` (only JSON on stdout, errors as JSON), `--project-dir PATH` (the
 folder holding `project.toml`), `--ui-dir PATH` (the ui folder alone,

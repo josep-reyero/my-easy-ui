@@ -434,12 +434,50 @@ def test_set_password_text_output(demo_app, typed, fast_hash):
 
 
 def test_set_password_mismatch_and_too_short(demo_app, typed, fast_hash):
-    typed += [PW, PW + "x"]
+    typed += [PW, PW + "x"] * auth.PROMPT_TRIES
     code, data = run_cli_json("set-password")
     assert code == 2 and data["error"]["code"] == "passwords_differ"
-    typed += ["short"]
+    typed += ["short"] * auth.PROMPT_TRIES
     code, data = run_cli_json("set-password")
     assert code == 2 and data["error"]["code"] == "password_too_short"
+    assert "12" in data["error"]["message"] and "set-password" in data["error"]["hint"]
+    assert auth.load_hash(demo_app.config().state.auth) is None
+    assert not typed
+
+
+@pytest.fixture
+def prompts(monkeypatch):
+    """Answers to the hidden prompt, and the prompts that were shown."""
+    answers: list[str] = []
+    shown: list[str] = []
+
+    def read(prompt):
+        shown.append(prompt)
+        return answers.pop(0)
+
+    monkeypatch.setattr(auth, "read_hidden", read)
+    return answers, shown
+
+
+def test_set_password_prompt_states_the_rule_and_asks_again(demo_app, prompts, fast_hash):
+    answers, shown = prompts
+    answers += ["short", PW, PW + "x", PW, PW]  # too short, then a mismatch, then right
+    code, out, err = run_cli("--json", "set-password")
+    assert code == 0 and json.loads(out)["password_set"] is True  # stdout is only the JSON result
+    assert f"at least {auth.MIN_LENGTH} characters" in shown[0]
+    assert "has 5 characters; it needs at least 12" in shown[1] and "2 tries left" in shown[1]
+    assert "not the same" in shown[3] and "1 try left" in shown[3]
+    assert all(f"at least {auth.MIN_LENGTH} characters" in p for p in shown if p.startswith(("New", "That", "The two")))
+    assert PW not in out + err and "short" not in out + err
+    assert auth.load_hash(demo_app.config().state.auth)
+
+
+def test_set_password_gives_up_after_three_tries(demo_app, prompts, fast_hash):
+    answers, shown = prompts
+    answers += ["short", "tiny", "x" * 11]
+    code, out, err = run_cli("set-password")
+    assert code == 2 and "too short" in out + err and "asked 3 times" in out + err
+    assert len(shown) == 3 and not answers
     assert auth.load_hash(demo_app.config().state.auth) is None
 
 

@@ -58,7 +58,10 @@ Public API
     ``root``, ``data``, ``specs``, ``auth`` (``auth_root``, else ``<root>/auth``), ``current``
     (= ``data/current``), ``project_file`` (= ``project.json``). ``ensure()`` creates the missing
     folders (mode 0700, or 0750 when the ui folder itself lets its group in, as on a server; the
-    sign-in folder is always 0700) and returns itself.
+    sign-in folder is always 0700) and returns itself; a folder it cannot create is ``folder_error``.
+    ``ensure_auth()`` creates only the sign-in folder, where this account may, and never raises.
+``folder_error(root, oserror) -> NotFound | Refused``  the plain error for a ui folder that cannot be made
+    (``folder_missing``, exit 3) or has a file in its place (``not_a_folder``, exit 5).
 ``state_paths(project, create=False) -> StatePaths``
 ``dir_mode(root) -> int``                 0750 for a group-readable ui folder, else 0700.
 ``make_dir(path, mode)``                  one folder with exactly that mode (whatever the umask).
@@ -93,6 +96,7 @@ Public API
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import re
 import signal
@@ -104,7 +108,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from easyui.errors import ConfigError, Refused, UsageError
+from easyui.errors import ConfigError, NotFound, Refused, UsageError
 
 MANIFEST_FILE = "project.toml"
 APP_MANIFEST_FILE = "app.toml"
@@ -266,18 +270,61 @@ class StatePaths:
         return self.root / PROJECT_FILE
 
     def ensure(self) -> StatePaths:
-        if not self.root.exists():
-            self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        shared = dir_mode(self.root)
-        for d in (self.data, self.specs):
-            make_dir(d, shared)
-        # The sign-in folder is always private to the account that runs the server.
+        """Create the missing folders; a folder that cannot be made is a plain error (``folder_error``)."""
+        try:
+            if not self.root.exists():
+                self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            shared = dir_mode(self.root)
+            for d in (self.data, self.specs):
+                make_dir(d, shared)
+                if not d.is_dir():
+                    raise NotADirectoryError(errno.ENOTDIR, "Not a directory", str(d))
+        except OSError as e:
+            raise folder_error(self.root, e) from None
+        return self.ensure_auth()
+
+    def ensure_auth(self) -> StatePaths:
+        """Create the sign-in folder (always private to the account that runs the server) where this account
+        may; never raises. ``check_auth_dir`` then says plainly what is wrong with it."""
         if not self.auth.exists() and not self.auth.is_symlink():
-            if not self.auth.parent.exists():
-                self.auth.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
             with contextlib.suppress(OSError):  # e.g. a server's project folder: the administrator makes it
+                if not self.auth.parent.exists():
+                    self.auth.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 make_dir(self.auth, 0o700)
         return self
+
+
+def _os_reason(e: OSError, folder: Path) -> str:
+    if isinstance(e, PermissionError):
+        return f"{display_path(folder)} does not let this account add folders"
+    if getattr(e, "errno", None) == errno.EROFS:
+        return "the disk it is on is read-only"
+    return (e.strerror or "the system refused").lower()
+
+
+def folder_error(root: Path, e: OSError) -> NotFound | Refused:
+    """A plain error for a ui folder (or one of its folders) that could not be made or used: ``NotFound``
+    (``folder_missing``) when it does not exist and cannot be created, ``Refused`` (``not_a_folder``) when
+    a file is in the way."""
+    root = Path(root)
+    failed = Path(e.filename) if isinstance(getattr(e, "filename", None), str) else root
+    if isinstance(e, (NotADirectoryError, FileExistsError)):
+        return Refused(
+            f"The ui folder {display_path(root)} cannot be used, because a file is where a folder should be "
+            f"({display_path(failed)}), so easy-ui stopped.",
+            hint="Check the path given with --ui-dir (or the project's ui folder), and move that file out of the way.",
+            code="not_a_folder",
+        )
+    inside = failed != root and root in failed.parents
+    what = f"is missing its {failed.name} folder" if inside else "does not exist"
+    return NotFound(
+        f"The ui folder {display_path(root)} {what}, and this account cannot create it ({_os_reason(e, failed.parent)}), "
+        "so easy-ui stopped.",
+        hint="Check the path given with --ui-dir. On a server the administrator creates the folders, with the owners "
+        "and modes easy-ui units lists, and the command runs as the account that uses them (for example sudo -u "
+        "mes-<project>-web); on your own computer, give a folder this account can write to.",
+        code="folder_missing",
+    )
 
 
 def state_paths(app: str, create: bool = False) -> StatePaths:
@@ -321,9 +368,14 @@ def check_auth_dir(path: Path) -> Path:
     try:
         st = os.lstat(path)
     except FileNotFoundError:
-        raise _auth_refused(path, "does not exist", "Create it, owned by the account that runs the dashboards, with "
-                            "mode 0700 (the files from easy-ui units list it), then set the password with "
-                            "easy-ui set-password.") from None
+        raise Refused(
+            f"The sign-in folder {display_path(path)} does not exist, and this account could not create it, so "
+            "easy-ui stopped.",
+            hint="Check the path given with --auth-dir (or --ui-dir: the sign-in folder is beside it). On a server "
+            "the administrator creates it, owned by the account that runs the dashboards, with mode 0700 (easy-ui "
+            "units lists it); then set the password with easy-ui set-password.",
+            code="auth_dir_unsafe",
+        ) from None
     if stat.S_ISLNK(st.st_mode):
         raise _auth_refused(path, "is a link to another place", "Replace the link with a real folder (mode 0700, owned "
                             "by the account that runs the dashboards) and set the password again.")

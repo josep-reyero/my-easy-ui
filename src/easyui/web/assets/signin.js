@@ -34,7 +34,7 @@ function previewView(root, title) {
 
 /**
  * renderSignIn(root, {app, ways, notice, preview, onSignedIn(how)}) -> stop()
- * ways: {password, passkeys, passkeys_here, recovery} from GET /api/session.
+ * ways: {password, password_set, passkeys, passkeys_here, recovery} from GET /api/session.
  */
 export function renderSignIn(root, { app, ways, notice, preview = false, onSignedIn }) {
   const title = (app && app.title) || "Dashboards";
@@ -264,14 +264,23 @@ export function renderSignIn(root, { app, ways, notice, preview = false, onSigne
 
   // ---- layout -----------------------------------------------------------
 
-  const lead = notice || (canPasskey ? "Sign in to see your dashboards." : "Enter your password to see your dashboards.");
+  // Nothing set up yet: no password and no passkey, so there is no way in until the owner sets a password.
+  const notSetUp = w.password_set === false && !w.passkeys && !w.recovery;
+  const lead = notice || (notSetUp ? "Nobody can sign in yet: no sign-in password has been set for these dashboards."
+    : canPasskey ? "Sign in to see your dashboards." : "Enter your password to see your dashboards.");
   const notes = [];
   if (w.passkeys && !canPasskey) {
     notes.push(w.passkeys_here
       ? "This browser cannot use passkeys. Use another browser, or another way to sign in here."
       : "Passkeys work when the dashboards are opened with their https address (or with http://localhost on the computer that runs them).");
   }
-  if (!showPassword && !canPasskey && !w.recovery) {
+  const setUp = notSetUp ? h("p", { class: "signin-foot" }, [
+    "The owner sets one by typing ",
+    h("code", { class: "cmd", text: "easy-ui set-password" }),
+    " in a terminal on the computer that runs the dashboards (on a server, as the account that runs them, with the "
+      + "same --ui-dir and --auth-dir), and types the password there. Then reload this page.",
+  ]) : null;
+  if (!notSetUp && !showPassword && !canPasskey && !w.recovery) {
     notes.push("Signing in with the password is turned off. The owner can turn it back on by typing easy-ui sign-in password on in a terminal on the computer that runs the dashboards.");
   }
 
@@ -285,6 +294,7 @@ export function renderSignIn(root, { app, ways, notice, preview = false, onSigne
       message,
       recovery ? h("div", { class: "signin-recovery-wrap" }, recovery) : null,
       ...notes.map((n) => h("p", { class: "signin-note", text: n })),
+      setUp,
       showPassword ? h("p", { class: "signin-foot" }, [
         "Forgotten the password? Set a new one by typing ",
         h("code", { class: "cmd", text: "easy-ui set-password" }),

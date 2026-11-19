@@ -50,7 +50,9 @@ Public API
 ``print_now(data, text, json_mode)``   print a line before a long-running command blocks.
 ``load_config(args) -> AppConfig``
 ``build_parser() -> (parser, load_problems)``
-``run(argv=None) -> int``               run one command line, return the exit code.
+``run(argv=None) -> int``               run one command line, return the exit code. An ``OSError`` no
+                                       command turned into a plain error becomes one (``file_problem``).
+``file_problem(oserror) -> EasyUIError``  that plain error (exit 3 missing, 5 not allowed, else 1).
 ``main(argv=None)``                     console entry point.
 """
 
@@ -69,7 +71,7 @@ from typing import Any, NoReturn
 
 from easyui import __version__, appconfig, bundle, formats, paths, spec
 from easyui.appconfig import AppConfig
-from easyui.errors import EasyUIError, NotAvailable, NotFound, UsageError
+from easyui.errors import EasyUIError, NotAvailable, NotFound, Refused, UsageError
 
 COMMAND_MODULES = ("easyui.server", "easyui.publish", "easyui.export", "easyui.screenshot")
 PLANNED_COMMANDS: dict[str, dict[str, str]] = {
@@ -487,6 +489,22 @@ def _emit_error(e: EasyUIError, json_mode: bool) -> None:
         sys.stderr.write(safe_text(f"Details: {e.detail}") + "\n")
 
 
+def file_problem(e: OSError) -> EasyUIError:
+    """The plain error for an ``OSError`` that reached the command line: ``NotFound`` (exit 3) for a missing
+    file or folder, ``Refused`` (exit 5) when this account may not use it, else exit 1."""
+    name = getattr(e, "filename", None)
+    where = f" ({paths.display_path(name)})" if isinstance(name, str) else ""
+    hint = ("Check the paths given with --project-dir, --ui-dir and --auth-dir, and that this account may use them "
+            "(on a server, run the command as the account the folders belong to), then try again.")
+    reason = (e.strerror or "the system refused").lower()
+    message = f"easy-ui could not use a file or folder it needs{where}: {reason}, so it stopped."
+    if isinstance(e, (FileNotFoundError, NotADirectoryError)):
+        return NotFound(message, hint=hint, code="file_problem")
+    if isinstance(e, PermissionError):
+        return Refused(message, hint=hint, code="file_problem")
+    return EasyUIError(message, hint=hint, code="file_problem")
+
+
 def run(argv: Sequence[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     json_mode = "--json" in raw
@@ -515,6 +533,10 @@ def run(argv: Sequence[str] | None = None) -> int:
     except EasyUIError as e:
         _emit_error(e, json_mode)
         return int(e.exit_code)
+    except OSError as e:  # a file or folder problem no command turned into a plain error itself: never a traceback
+        err = file_problem(e)
+        _emit_error(err, json_mode)
+        return int(err.exit_code)
     except KeyboardInterrupt:
         return 130
     result = out if isinstance(out, Result) else Result(out)

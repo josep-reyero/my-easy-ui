@@ -103,7 +103,22 @@ and recovery codes, shown once in a monospaced grid with Copy and "I have saved 
 any of these asks for a sign-in within the last ten minutes. When the page signed in with the
 password or a recovery code and a passkey is saved, every change, adding a passkey too, first asks
 the device for one of the saved passkeys; a passkey added since that sign-in cannot confirm it,
-and the page says to sign in with it instead.
+and the page says to sign in with it instead. Before any password is set, the page shows no form:
+it says that nobody can sign in yet, and that the owner sets the password by typing
+`easy-ui set-password` in a terminal on the computer that runs the dashboards.
+
+**Behind a proxy.** The page is opened from other devices through a proxy on the same computer,
+such as `tailscale serve --bg --https=443 unix:/run/mes/<project>-web.sock`. A proxy that forwards
+to a local (unix) socket names the socket in `Host` (`localhost`) and the address the browser used
+in `X-Forwarded-Host`, so on a local socket, and only there, easy-ui takes the request's address
+from that single header (a repeated or malformed one is refused) and checks it against the
+configured `--origin` exactly as it checks `Host` over TCP; over TCP `X-Forwarded-Host` is never
+read. Whoever can connect to the socket is trusted to state the host, so keep the socket
+owner-only: the systemd socket is root's with mode 0600 (only the proxy, which runs as root, can
+connect), and `easy-ui serve --socket PATH` makes it owner-only and refuses a folder other
+accounts can write to. A proxy given the socket must set `X-Forwarded-Host` itself (or drop the
+browser's), as `tailscale serve` does. Whether the page is on https still comes only from the
+configured origin, never from `X-Forwarded-Proto`.
 
 **Shared copy.** A copy made by `easy-ui export` says "Shared copy · 16 Nov 2026" where Sign out
 would be. Its controls are shown as plain values ("From 1 Jan 2026 · Group by Week") with a note

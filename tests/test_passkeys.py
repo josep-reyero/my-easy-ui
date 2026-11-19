@@ -483,7 +483,7 @@ def with_passkey(env):
 def test_full_passkey_journey(with_passkey):
     env, a = with_passkey
     c = env.make()
-    assert c.get("/api/session").json()["sign_in"] == {"password": True, "passkeys": True, "passkeys_here": True, "recovery": False}
+    assert c.get("/api/session").json()["sign_in"] == {"password": True, "password_set": True, "passkeys": True, "passkeys_here": True, "recovery": False}
     r, _cred = passkey_login(c, a)
     assert r.status_code == 200, r.text
     assert r.json()["signed_in"] is True

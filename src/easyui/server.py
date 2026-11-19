@@ -33,9 +33,10 @@ Commands registered here (see ``easyui.cli`` for the contract):
 HTTP API (JSON; every route except session, login, logout, recovery, passkeys/options with purpose
 "login" and passkeys/login needs a session)
 -----------------------------------------------------------------------------------------------------
-``GET /api/session``          ``{signed_in, app: {name, title, accent}, sign_in: {password, passkeys,
-                              passkeys_here, recovery}}`` (``sign_in`` is left out in a preview, which
-                              has ``preview: true``).
+``GET /api/session``          ``{signed_in, app: {name, title, accent}, sign_in: {password, password_set,
+                              passkeys, passkeys_here, recovery}}`` (``sign_in`` is left out in a preview,
+                              which has ``preview: true``). With no password set and no passkey, the page
+                              says that nobody can sign in yet and that the owner runs easy-ui set-password.
 ``POST /api/login``           ``{password}`` -> ``{signed_in: true, app}`` and the session cookie. 403
                               ``password_off`` when password sign-in is switched off; 429 when throttled.
 ``POST /api/recovery``        ``{code}`` -> signed in; the code is used up. Throttled in its own buckets.
@@ -117,7 +118,8 @@ Public API
 ----------
 ``WEB_DIR``, ``DEFAULT_PORT``, ``DEFAULT_IDLE_MINUTES``, ``MAX_QUERIES_PER_REQUEST``
 ``ServerSettings`` (dataclass): ``origins`` (the public web addresses), ``local_port`` (the
-    127.0.0.1 port, for local use when there are no origins), ``idle_seconds``, ``max_body``,
+    127.0.0.1 port, for local use when there are no origins), ``unix_socket`` (it listens on a local socket,
+    so ``X-Forwarded-Host`` names the host; see ``easyui.security``), ``idle_seconds``, ``max_body``,
     ``max_queries``, ``query_slots`` (also the number of query workers), ``slot_wait_s``, ``worker_idle_s``
     (an unused worker stops after this long), ``limits``, ``web_dir``, ``session_idle``, ``session_absolute``,
     ``request_time_s``.
@@ -133,6 +135,10 @@ Public API
 ``configured_origins(origins=(), hosts=(), env=None) -> tuple[str, ...]``  ``--origin``, ``--allow-host``,
                                           ``EASYUI_ORIGINS`` and ``EASYUI_ALLOW_HOSTS`` together.
 ``open_listener(*, socket_path=None, port=None, bind=None, env=None) -> (socket, url_or_path, kind)``
+    ``--socket PATH`` makes the socket owner-only (0600) and refuses (``socket_dir_unsafe``) a folder that
+    another account can write to or change.
+``settings_for_listener(sock, kind, origins=(), **settings) -> ServerSettings``  ``local_port`` and
+    ``unix_socket`` from the socket itself.
 ``safe_auth_dir(config) -> Path``          the sign-in folder; ``Refused`` (``auth_dir_unsafe``) when it is a
                                           link, another account's, not 0700, or in a folder others can change.
 ``run_checks(config) -> dict``
@@ -250,6 +256,9 @@ class ServerSettings:
     session_idle: int = IDLE_SECONDS
     session_absolute: int = ABSOLUTE_SECONDS
     request_time_s: float = REQUEST_TIME_S
+    # The server listens on a local (unix) socket: set from the listening socket's family (settings_for_listener),
+    # never from a request. Only then does X-Forwarded-Host name the request's host (see easyui.security).
+    unix_socket: bool = False
 
 
 class Activity:
@@ -497,6 +506,7 @@ def _sign_in_ways(st: ServerState, request: Request) -> dict[str, Any]:
     n = store.count()
     return {
         "password": has_password and store.password_sign_in(),
+        "password_set": has_password,
         "passkeys": n > 0,
         "passkeys_here": passkeys_usable_here(request),
         "recovery": n > 0 and passkeys.RecoveryCodes(st.config.state.auth).left() > 0,
@@ -1258,7 +1268,8 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.easyui = state
-    outer = security.SecurityMiddleware(app, origins=state.origins, max_body=settings.max_body)
+    outer = security.SecurityMiddleware(app, origins=state.origins, max_body=settings.max_body,
+                                        unix_socket=settings.unix_socket)
     outer.easyui = state  # type: ignore[attr-defined]
     return outer
 
@@ -1333,6 +1344,7 @@ def _unix_socket(path: Path) -> socket.socket:
     path = Path(path)
     if len(os.fsencode(path)) > 100:
         raise UsageError("The socket path is too long for this system.", hint="Use a shorter path, for example /run/easy-ui/app.sock.")
+    _socket_folder(path)
     if path.exists() or path.is_symlink():
         if not stat.S_ISSOCK(path.lstat().st_mode):
             raise Refused(
@@ -1351,15 +1363,65 @@ def _unix_socket(path: Path) -> socket.socket:
             )
         finally:
             probe.close()
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    old = os.umask(0o177)
+    old = os.umask(0o177)  # owner-only from the moment it exists: whoever can connect is trusted to state the host
     try:
         sock.bind(str(path))
+    except OSError as e:
+        sock.close()
+        raise Refused(
+            f"easy-ui could not make the socket {paths.display_path(path)} ({(e.strerror or 'refused').lower()}), so "
+            "the server did not start.",
+            hint="Choose a --socket path in a folder this account owns and may write to.",
+            code="socket_unusable",
+        ) from None
     finally:
         os.umask(old)
-    os.chmod(path, 0o660)
+    os.chmod(path, 0o600)
     return sock
+
+
+def _socket_folder(path: Path) -> None:
+    """Make the socket's folder (0700) when missing, and refuse one another account can write to or change.
+
+    A proxy that forwards to a local socket states the request's host (``X-Forwarded-Host``), and easy-ui
+    believes it, so only the account running the server (and root, which runs the proxy) may reach the socket:
+    in a folder others can write, another account could put its own socket in its place."""
+    folder = path.parent
+    try:
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        st = os.stat(folder)
+        link = os.lstat(folder)
+    except OSError as e:
+        raise Refused(
+            f"The folder for the socket, {paths.display_path(folder)}, does not exist and cannot be created "
+            f"({(e.strerror or 'refused').lower()}), so the server did not start.",
+            hint="Choose a --socket path in a folder this account owns, for example one made with mkdir -m 700.",
+            code="socket_dir_unsafe",
+        ) from None
+    unsafe = None
+    if link.st_uid not in (0, os.geteuid()):
+        unsafe = f"{paths.display_path(folder)} is a link that belongs to another account"
+    elif st.st_uid not in (0, os.geteuid()):
+        unsafe = f"{paths.display_path(folder)} belongs to another account"
+    elif st.st_mode & 0o022:
+        unsafe = f"other accounts can write to {paths.display_path(folder)}"
+    else:
+        real = Path(os.path.realpath(folder))
+        for d in real.parents:
+            with contextlib.suppress(OSError):
+                if paths._changeable_by_others(os.stat(d)):
+                    unsafe = f"another account can change {paths.display_path(d)}, which holds it"
+                    break
+    if unsafe:
+        raise Refused(
+            f"easy-ui will not listen on {paths.display_path(path)}, because {unsafe}. Whoever can connect to the "
+            "socket is trusted to say which web address a request was made on, so the socket must stay reachable "
+            "only by this account (and the local proxy, which runs as root).",
+            hint="Choose a --socket path in a folder only this account can write to, for example one made with "
+            "mkdir -m 700 (a socket in /tmp itself is refused).",
+            code="socket_dir_unsafe",
+        )
 
 
 def open_listener(
@@ -1768,6 +1830,13 @@ def _listening_port(sock: socket.socket, kind: str) -> int | None:
     return int(sock.getsockname()[1])
 
 
+def settings_for_listener(sock: socket.socket, kind: str, origins: tuple[str, ...] = (), **kw: Any) -> ServerSettings:
+    """The ``ServerSettings`` for the socket ``serve`` listens on (``--socket``, ``--port`` or systemd's): the local
+    port for TCP, and ``unix_socket`` from the socket's own family, so a request can never claim it."""
+    return ServerSettings(origins=tuple(origins), local_port=_listening_port(sock, kind),
+                          unix_socket=sock.family == socket.AF_UNIX, **kw)
+
+
 def resolve_idle_minutes(value: float | None, env: dict[str, str] | None = None) -> float:
     """``--idle-minutes``, or its default: stopping when idle only makes sense when systemd starts the
     server again on the next visit (it passed the socket in ``LISTEN_FDS``); started by hand, never."""
@@ -1811,7 +1880,8 @@ def _cmd_serve(args: argparse.Namespace) -> Any:
     with stop_signals(stop_now) as caught:
         sock, where, kind = open_listener(socket_path=args.socket, port=args.port, bind=args.bind)
         try:
-            local_port = _listening_port(sock, kind)
+            settings = settings_for_listener(sock, kind, origins, idle_seconds=idle_minutes * 60)
+            local_port = settings.local_port
             if not origins and local_port is None:
                 raise UsageError(
                     "The server listens on a local socket but was not told the web address the dashboards are opened "
@@ -1820,7 +1890,6 @@ def _cmd_serve(args: argparse.Namespace) -> Any:
                     "https://myserver.example.ts.net (the service files from easy-ui units --origin do this).",
                     code="origin_needed",
                 )
-            settings = ServerSettings(origins=origins, local_port=local_port, idle_seconds=idle_minutes * 60)
             security.verify_vendored(settings.web_dir)
             sandbox.ensure_heap_limit()  # queries run in workers (easyui.workers), each with its own cap
             logging.config.dictConfig(_log_config())
@@ -1853,8 +1922,9 @@ def _cmd_serve(args: argparse.Namespace) -> Any:
 
 
 def safe_auth_dir(config: AppConfig) -> Path:
-    """The sign-in folder, created when missing (where this account may) and refused when unsafe."""
-    st = config.state.ensure()
+    """The sign-in folder, created when missing (where this account may) and refused when unsafe. Only the
+    sign-in folder is made: the sign-in commands do not need the ui folder."""
+    st = config.state.ensure_auth()
     return paths.check_auth_dir(st.auth)
 
 
@@ -1983,7 +2053,7 @@ def _cmd_recovery_codes(args: argparse.Namespace) -> Any:
     from easyui.cli import Result, load_config  # noqa: PLC0415
 
     config = load_config(args)
-    st = config.state.ensure()
+    st = config.state
     safe_auth_dir(config)
     tty = authmod.open_terminal()
     if tty is None:

@@ -4,6 +4,10 @@
 
 - ``mes-<project>-web.socket`` listens on a unix socket (mode 0600, owned by root
   by default, so only the local proxy, for example Tailscale serve, can connect).
+  Whoever can connect is trusted to state each request's web address: on a unix
+  socket the server reads it from ``X-Forwarded-Host``, which ``tailscale serve``
+  sets itself (see ``easyui.security``). Another ``--socket-owner`` must be a
+  proxy that does the same.
   systemd starts the service on the first connection (the service has no
   ``[Install]`` section, so it never runs at boot by itself).
 - ``mes-<project>-web.service`` runs ``easy-ui serve --ui-dir <root>/<project>/ui``
@@ -508,7 +512,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--exec", dest="exec_path", default=DEFAULT_EXEC, help=f"path of easy-ui on the server (default {DEFAULT_EXEC})")
     p.add_argument("--root", default=DEFAULT_ROOT, help=f"the folder holding every project on the server (default {DEFAULT_ROOT})")
     p.add_argument("--socket", help=f"the socket path (default {DEFAULT_SOCKET_DIR}/<project>-web.sock)")
-    p.add_argument("--socket-owner", default="root", help="the account that may connect to the socket (default root)")
+    p.add_argument("--socket-owner", default="root", help="the account that may connect to the socket (default root); it is trusted to state each request's "
+                   "web address in X-Forwarded-Host, so name only a proxy that sets that header itself")
     p.add_argument("--memory-max", default=DEFAULT_MEMORY_MAX, help=f"memory limit (default {DEFAULT_MEMORY_MAX})")
     p.add_argument(
         "--origin",

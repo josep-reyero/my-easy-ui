@@ -207,7 +207,7 @@ def test_session_endpoint_before_sign_in(client):
     assert r.json() == {
         "signed_in": False,
         "app": {"name": "demo", "title": "Demo project", "accent": "#2f6fdf"},
-        "sign_in": {"password": True, "passkeys": False, "passkeys_here": True, "recovery": False},
+        "sign_in": {"password": True, "password_set": True, "passkeys": False, "passkeys_here": True, "recovery": False},
     }
 
 
@@ -928,7 +928,7 @@ def test_unix_socket_listener(short_dir):
     sock, where, kind = server.open_listener(socket_path=path, env={})
     try:
         assert kind == "unix" and stat.S_ISSOCK(path.stat().st_mode)
-        assert stat.S_IMODE(path.stat().st_mode) == 0o660
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600  # owner-only: whoever connects states the host
         with pytest.raises(Exception) as e:  # a second server on the same socket
             server.open_listener(socket_path=path, env={})
         assert getattr(e.value, "code", "") == "temporary"

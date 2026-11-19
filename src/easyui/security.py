@@ -17,10 +17,25 @@ whole app. In order, for each HTTP request it:
 
 1. Refuses a request that has more than one ``Host``, ``Origin``,
    ``Sec-Fetch-Site`` or ``Content-Type`` header (each part of easy-ui must read
-   the same value).
-2. Matches the ``Host`` header (name *and* port) against the accepted origins;
-   a request under any other name or port is refused. This stops DNS
-   rebinding, and pages on other ports of the same computer.
+   the same value), and, on a local (unix) socket, more than one
+   ``X-Forwarded-Host``.
+2. Works out the request's *host*: the ``Host`` header, except when the server
+   listens on a local (unix) socket (``unix_socket=True``, decided from the
+   listening socket's family, never from the request) and the request has an
+   ``X-Forwarded-Host`` header: then that header's single value. A proxy that
+   forwards to a socket names the socket's own address in ``Host``
+   (``tailscale serve`` sends ``Host: localhost``) and the name the browser
+   used in ``X-Forwarded-Host``, replacing any value the browser sent.
+   Whoever can connect to the socket is trusted to state the host, so the
+   socket must be reachable only by the proxy (``serve --socket`` makes it
+   owner-only; the systemd unit makes it root's, mode 0600). Over TCP
+   ``X-Forwarded-Host`` is never read: there ``Host`` alone decides. A
+   malformed ``X-Forwarded-Host`` (a list, a path, a bad name) is refused. The
+   host (name *and* port) is matched against the accepted origins; a request
+   under any other name or port is refused. This stops DNS rebinding, and pages
+   on other ports of the same computer. When it came from ``X-Forwarded-Host``,
+   the ``Host`` header the app sees is replaced by it, so every later part
+   reads the same host.
 3. Works out whether the page is on HTTPS (for the cookie flags and HSTS) from
    the configured origin the request matched: ``https://NAME`` means HTTPS,
    ``http://...`` means plain http. No request header (``X-Forwarded-Proto``
@@ -61,6 +76,8 @@ Public API
     ``rp_ids()``, ``passkey_origins(rp_id)``.
 ``RequestInfo`` (frozen dataclass): ``https``, ``host``, ``origin``, ``trusted_peer``, ``site``.
 ``split_host(value) -> (host, port | None) | None``
+``effective_host(headers, unix_socket) -> str | None``  the host a request names (step 2); raises ``ValueError``
+    for a malformed or repeated ``X-Forwarded-Host`` on a unix socket.
 ``normalize_host(value) -> str | None``  ``"Example.org:443"`` -> ``"example.org"``; None when malformed.
 ``is_trusted_peer(client) -> bool``      unix socket (no peer address) or loopback.
 ``is_https(scope) -> bool``               the connection itself is TLS (headers are never read).
@@ -69,7 +86,8 @@ Public API
 ``security_headers(path, https) -> list[tuple[bytes, bytes]]``
 ``scrub(text) -> str``                   removes file paths from text sent to the browser.
 ``error_body(code, message, hint) -> bytes``
-``SecurityMiddleware(app, *, origins=Origins(), max_body=DEFAULT_MAX_BODY, body_timeout=BODY_TIMEOUT)``
+``SecurityMiddleware(app, *, origins=Origins(), max_body=DEFAULT_MAX_BODY, body_timeout=BODY_TIMEOUT, unix_socket=False)``
+    ``unix_socket``: the server listens on a local (unix) socket, so ``X-Forwarded-Host`` names the host.
 ``request_info(request) -> RequestInfo``
 ``verify_vendored(web_dir) -> None``     checks the third-party page files (ECharts) against the hashes in
     ``assets/vendor/MANIFEST.json``; raises ``Refused`` (code ``vendor_changed``) when one differs or is missing.
@@ -120,6 +138,8 @@ _HOSTNAME_RE = re.compile(r"^(?=.{1,253}\Z)[a-z0-9](?:[a-z0-9-]{0,62})(?:\.[a-z0
 _PORT_RE = re.compile(r"^\d{1,5}\Z")
 # Headers that must appear at most once: every part of easy-ui has to read the same value.
 _SINGLE_HEADERS = (b"host", b"origin", b"sec-fetch-site", b"content-type")
+FORWARDED_HOST = b"x-forwarded-host"  # read only on a local (unix) socket; see effective_host
+_MAX_LOGGED_HOSTS = 20  # unknown names noted in the log, so a scanner cannot fill it
 # A Unix path or a ~/ path, not part of a URL ("https://...") or a word ("km/h").
 _PATH_RE = re.compile(r"(?<![\w:/.])(?:~/|/)(?:[\w.@+-]+/)*[\w.@+-]*[\w@+-](?:/)?")
 
@@ -289,11 +309,23 @@ def is_trusted_peer(client: Any) -> bool:
     return addr.is_loopback
 
 
-def _header(scope: dict[str, Any], name: bytes) -> str | None:
-    for k, v in scope.get("headers") or ():
-        if k == name:
-            return v.decode("latin-1")
-    return None
+def effective_host(headers: Iterable[tuple[bytes, bytes]], unix_socket: bool) -> str | None:
+    """The host a request names: its ``X-Forwarded-Host`` when the server listens on a local (unix) socket and
+    the header is there, else its ``Host`` header (None when it has none). On a unix socket an
+    ``X-Forwarded-Host`` that is repeated or is not one ``name[:port]`` raises ``ValueError``. Over TCP
+    ``X-Forwarded-Host`` is never read."""
+    headers = list(headers)
+    host = next((v.decode("latin-1") for k, v in headers if k == b"host"), None)
+    if not unix_socket:
+        return host
+    forwarded = [v.decode("latin-1") for k, v in headers if k == FORWARDED_HOST]
+    if not forwarded:
+        return host
+    if len(forwarded) > 1:
+        raise ValueError("more than one X-Forwarded-Host header")
+    if split_host(forwarded[0]) is None:
+        raise ValueError("an X-Forwarded-Host header that is not one name and port")
+    return forwarded[0].strip()
 
 
 def is_https(scope: dict[str, Any]) -> bool:
@@ -369,12 +401,31 @@ def request_info(request: Any) -> RequestInfo:
 
 class SecurityMiddleware:
     def __init__(
-        self, app: Any, *, origins: Origins | None = None, max_body: int = DEFAULT_MAX_BODY, body_timeout: float = BODY_TIMEOUT
+        self,
+        app: Any,
+        *,
+        origins: Origins | None = None,
+        max_body: int = DEFAULT_MAX_BODY,
+        body_timeout: float = BODY_TIMEOUT,
+        unix_socket: bool = False,
     ) -> None:
         self.app = app
         self.body_timeout = float(body_timeout)
         self.origins = origins if origins is not None else Origins()
         self.max_body = int(max_body)
+        self.unix_socket = bool(unix_socket)
+        self._logged_hosts: set[str] = set()
+
+    def _note_unknown(self, host: str | None, forwarded: bool) -> None:
+        name = host if host is not None and split_host(host) is not None else "(no valid name)"
+        if name in self._logged_hosts or len(self._logged_hosts) >= _MAX_LOGGED_HOSTS:
+            return
+        self._logged_hosts.add(name)
+        log.warning(
+            "refused a request for %s (from %s, on a %s); this server answers only to %s",
+            name[:300], "X-Forwarded-Host" if forwarded else "the Host header",
+            "local socket" if self.unix_socket else "TCP port", self.origins.describe(),
+        )
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] != "http":
@@ -417,8 +468,9 @@ class SecurityMiddleware:
             )
             await send({"type": "http.response.body", "body": body if scope.get("method") != "HEAD" else b""})
 
-        raw_headers = scope.get("headers") or ()
-        for name in _SINGLE_HEADERS:
+        raw_headers = list(scope.get("headers") or ())
+        single = _SINGLE_HEADERS + ((FORWARDED_HOST,) if self.unix_socket else ())
+        for name in single:
             if sum(1 for k, _ in raw_headers if k == name) > 1:
                 await refuse(
                     400,
@@ -427,18 +479,40 @@ class SecurityMiddleware:
                     "Send the request again from the dashboards page.",
                 )
                 return
-        host_header = _header(scope, b"host")
+        try:
+            host_header = effective_host(raw_headers, self.unix_socket)
+        except ValueError:
+            await refuse(
+                400,
+                "bad_request",
+                "The request's X-Forwarded-Host header was not one web address name, so it was refused.",
+                "A proxy in front of easy-ui sends the single name the browser used, for example "
+                "X-Forwarded-Host: myserver.example.ts.net.",
+            )
+            return
+        forwarded = self.unix_socket and any(k == FORWARDED_HOST for k, _ in raw_headers)
         site = self.origins.match(host_header, https)
         if site is None:
+            self._note_unknown(host_header, forwarded)
+            parts = split_host(host_header)
+            seen = (parts[0] + (f":{parts[1]}" if parts[1] is not None else "")) if parts else None
             await refuse(
                 400,
                 "unknown_host",
-                "This server was reached under a name or port it does not answer to, so it refused the request. "
-                "This protects your dashboards from other web sites that try to reach them.",
+                "This server was reached under a name or port it does not answer to"
+                + (f" ({seen})" if seen else "")
+                + ", so it refused the request. This protects your dashboards from other web sites that try to "
+                "reach them.",
                 "Open the dashboards with the address easy-ui gave you. If this server has a new address, start it "
-                "with easy-ui serve --origin https://NAME (or --allow-host NAME).",
+                "with easy-ui serve --origin https://NAME (or --allow-host NAME). Behind a proxy, the proxy must pass "
+                "on the name the browser used: in the Host header over a TCP port, or in Host or X-Forwarded-Host on "
+                "a local socket (tailscale serve does this). The server's log names the address it answers to.",
             )
             return
+        if forwarded:  # every later part reads the host from the Host header: give it the one that was matched
+            scope["headers"] = [(k, v) for k, v in raw_headers if k not in (b"host", FORWARDED_HOST)] + [
+                (b"host", host_header.encode("latin-1"))
+            ]
         https = site.scheme == "https"
         info = RequestInfo(https, site.host_port, str(site), is_trusted_peer(scope.get("client")), site)
         scope.setdefault("state", {})["easyui"] = info

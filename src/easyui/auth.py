@@ -75,7 +75,7 @@ to matter, given the minimum length and Argon2id.
 
 Public API
 ----------
-``MIN_LENGTH``, ``MAX_LENGTH``, ``ARGON2``, ``OWASP_MINIMUM``, ``VERIFY_SLOTS``,
+``MIN_LENGTH``, ``MAX_LENGTH``, ``PROMPT_TRIES``, ``ARGON2``, ``OWASP_MINIMUM``, ``VERIFY_SLOTS``,
 ``FREE_ATTEMPTS``, ``UNTRUSTED_CAP``, ``DEVICE_CAP``, ``FORGET_AFTER``,
 ``DEVICE_MAX_FAILURES``, ``DEVICE_LIFETIME``
 ``WrongPassword`` (401), ``TooManyAttempts`` (429, ``retry_after``), ``VerifierBusy`` (503).
@@ -87,7 +87,8 @@ Public API
 ``password_status(auth_dir) -> dict``     ``{"set", "file_private", "algorithm_ok", "parameters"}``.
 ``set_password(auth_dir, password) -> dict`` saves it; signs everyone out; ``{"signed_out", ...}``.
 ``read_hidden(prompt) -> str``            hidden prompt on the terminal; ``NeedsHuman`` without one.
-``prompt_new_password() -> str``          asks twice.
+``prompt_new_password(tries=PROMPT_TRIES) -> str``  asks twice; the prompt states the rule, and a too-short or
+    mismatched entry asks again (3 times in all) before the ``UsageError``.
 ``delay_for(failures, cap) -> float``
 ``Throttle(auth_dir, clock=time.time)``   ``wait_left(bucket)``, ``reserve(bucket, cap)``,
                                           ``succeed(bucket)``, ``failures(bucket)``, ``clear()``.
@@ -138,6 +139,7 @@ from easyui.sessions import (
 )
 
 MIN_LENGTH = 12
+PROMPT_TRIES = 3  # set-password asks again after a too-short or mismatched entry, this many times in all
 MAX_LENGTH = 1024
 ARGON2 = {"time_cost": 3, "memory_cost": 65536, "parallelism": 4, "hash_len": 32, "salt_len": 16}
 OWASP_MINIMUM = {"time_cost": 2, "memory_cost": 19456, "parallelism": 1}
@@ -316,17 +318,42 @@ def read_hidden(prompt: str) -> str:
             raise UsageError("No password was typed, so nothing was changed.", hint="Run easy-ui set-password again.") from None
 
 
-def prompt_new_password() -> str:
-    pw = read_hidden(f"New sign-in password (at least {MIN_LENGTH} characters; it does not show while you type): ")
-    check_new_password(pw)
-    again = read_hidden("Type the same password again: ")
-    if normalize(again) != normalize(pw):
-        raise UsageError(
-            "The two passwords were not the same, so nothing was changed.",
-            hint="Run easy-ui set-password again and type the same password twice.",
-            code="passwords_differ",
+def prompt_new_password(tries: int = PROMPT_TRIES) -> str:
+    """Ask for a new password twice on the terminal. The rule is in the prompt; an entry that breaks it, or a
+    second entry that differs, asks again, up to ``tries`` times, then raises the last ``UsageError``."""
+    note = ""
+    last: UsageError | None = None
+    for attempt in range(1, max(1, tries) + 1):
+        pw = read_hidden(
+            f"{note}New sign-in password (at least {MIN_LENGTH} characters, for example a few unrelated words; "
+            "it does not show while you type): "
         )
-    return pw
+        try:
+            check_new_password(pw)
+        except UsageError as e:
+            last = e
+        else:
+            again = read_hidden("Type the same password again: ")
+            if normalize(again) == normalize(pw):
+                return pw
+            last = UsageError(
+                "The two passwords were not the same, so nothing was changed.",
+                hint="Run easy-ui set-password again and type the same password twice.",
+                code="passwords_differ",
+            )
+        left = max(1, tries) - attempt
+        n = len(normalize(pw))
+        why = (
+            (f"That password has {n} characters; it needs at least {MIN_LENGTH}." if n < MIN_LENGTH
+             else "A password cannot be only spaces.")
+            if last.code == "password_too_short"
+            else "The two passwords were not the same."
+            if last.code == "passwords_differ"
+            else last.message
+        )
+        note = f"{why} Nothing was saved. Try again ({left} {'try' if left == 1 else 'tries'} left).\n"
+    assert last is not None
+    raise UsageError(f"{last.message} easy-ui asked {max(1, tries)} times.", hint=last.hint, code=last.code)
 
 
 # ---------------------------------------------------------------- throttle
