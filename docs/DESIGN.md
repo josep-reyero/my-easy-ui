@@ -32,8 +32,8 @@ not the screen, so it holds in a split window, after a zoom and on a turned phon
 component, its own width decides: a figure shrinks to fit a narrow tile, a table becomes cards, a
 chart grows taller. When the menu's links do not fit across, they fold into one button that names
 the current page and opens them as a list. The page
-opens on the first dashboard of the project's order (`[ui] dashboards`), also in a shared copy; "All" in the menu lists
-every dashboard with its description. Stats
+opens on the first dashboard of the project's order (`[ui] dashboards`), also in a shared copy; with more than six dashboards the menu ends with "All", which lists
+every dashboard with its description (the list is at `#/all` for any number). Stats
 sit straight on the page under a hairline. Charts and tables sit on slightly raised panels with no
 shadow. Text is plain prose, at most 66 characters wide, however wide the page.
 

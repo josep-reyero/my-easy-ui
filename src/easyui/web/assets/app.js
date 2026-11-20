@@ -110,10 +110,14 @@ function renderNav() {
     return h("li", null, link);
   });
   const onList = parseHash().name === "list";
-  items.push(h("li", null, routeLink("#/all", "All", {
-    class: "nav-link nav-all",
-    attrs: { "aria-current": onList ? "page" : null, "aria-label": "All dashboards, with what each shows" },
-  })));
+  // With a handful of pages the menu already shows them all; the list page earns a link only when
+  // there are many (it stays reachable at #/all either way).
+  if (state.dashboards.length > 6 || onList) {
+    items.push(h("li", null, routeLink("#/all", "All", {
+      class: "nav-link nav-all",
+      attrs: { "aria-current": onList ? "page" : null, "aria-label": "All dashboards, with what each shows" },
+    })));
+  }
   const list = h("ul", { class: "nav-list", id: "eui-nav-list" }, items);
   // When the links do not fit across (a phone, or many dashboards), they fold into a menu button that
   // names the page you are on and opens them as a list.
